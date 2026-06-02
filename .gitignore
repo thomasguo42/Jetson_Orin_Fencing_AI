@@ -1,0 +1,115 @@
+# Local assistant/session files
+.codex
+.agents/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Python environments and caches
+.venv
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+pip-wheel-metadata/
+
+# Build outputs and compiled artifacts
+=*
+build/
+dist/
+site/
+.ninja_deps
+.ninja_log
+build.ninja
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.pb.o
+*.pb.h
+*.pb.cc
+*_pb2.py
+
+# Runtime logs, phrase inputs, recordings, and generated outputs
+logs/
+runtime_inputs/
+runtime_outputs/
+recordings/
+20*_phrase*/
+20*_phrase*.avi
+20*_phrase*.mp4
+20*_phrase*.txt
+analysis_result*.json
+debug.txt
+*.log
+
+# Video and generated media artifacts
+*.avi
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.m4v
+*_overlay*.png
+*_firstframe.png
+bootstrap_*.png
+sam3_*.png
+
+# Model weights, exported models, TensorRT engines, and trained classifiers
+*.pt
+*.pth
+*.onnx
+*.engine
+*.safetensors
+*.joblib
+*.pkl
+*.pickle
+*.weights
+*.trt
+*.plan
+portable_fencing_pipeline/models
+portable_fencing_pipeline/models/
+portable_fencing_pipeline_low_latency/models
+portable_fencing_pipeline_low_latency/models/
+portable_fencing_pipeline_low_latency_streaming/models
+portable_fencing_pipeline_low_latency_streaming/models/
+pistelink_ai_pipeline/**/models
+pistelink_ai_pipeline/**/models/
+
+# Dataset/intermediate table artifacts
+*.xlsx
+*.xls
+*.csv
+*.jsonl
+*.ndjson
+
+# Downloaded or installed vendor dependency trees
+.vendor/
+.vendor_py/
+.vendor_pose/
+model_variants/
+
+# Generated engine/model experiment outputs while keeping experiment scripts
+engine_artifacts/
+engine_models/
+**/experiments/yolov8_pose/matrix_*/
+**/experiments/yolov8_pose/*_record.json
+**/experiments/yolov8_pose/*_overlay_summary*.json
+**/experiments/yolov8_pose/*_overlay_firstframe.png
+**/experiments/yolov8_pose/*_pose_pt_fp16.json

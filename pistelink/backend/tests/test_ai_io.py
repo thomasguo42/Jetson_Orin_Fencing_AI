@@ -8,6 +8,7 @@ fake — both transport-agnostic, so the tests run on Windows too.
 
 import asyncio
 import json
+import logging
 
 from backend import ai_io
 from backend.ai_io import AIClient
@@ -152,10 +153,79 @@ def test_handshake_version_mismatch_closes(monkeypatch):
         _line({"v": 1, "type": "hello_ack", "id": 0, "payload": {"protocol_v": 2}})],
         on_event=on_event)
     assert client._handshake_done is False
+    assert client._fatal_protocol_error is True
     assert client.connected is False
     assert fw.closed is True
     assert any(e[0] == "ai_error" and e[1]["code"] == "E_AI_PROTO_VER"
                for e in events)
+
+
+def test_run_does_not_retry_protocol_version_mismatch(monkeypatch):
+    events, on_event = _recorder()
+    calls = {"open": 0}
+
+    class FakeConfig:
+        def get(self, section, key):
+            return {
+                ("ai", "socket"): "/run/pistelink/ai.sock",
+                ("ai", "reconnect_min_s"): 0.01,
+                ("ai", "reconnect_max_s"): 0.01,
+            }[(section, key)]
+
+    async def fake_open(_path):
+        calls["open"] += 1
+        reader = asyncio.StreamReader()
+        reader.feed_data(
+            _line({"v": 1, "type": "hello_ack", "id": 0,
+                   "payload": {"protocol_v": 2}})
+        )
+        reader.feed_eof()
+        return reader, FakeWriter()
+
+    async def scenario():
+        monkeypatch.setattr(ai_io, "get_config", lambda: FakeConfig())
+        monkeypatch.setattr(ai_io, "_socket_exists", lambda _path: True)
+        monkeypatch.setattr(ai_io.asyncio, "open_unix_connection", fake_open,
+                            raising=False)
+        client = AIClient(on_event=on_event)
+        await client.run()
+        return client
+
+    client = asyncio.run(scenario())
+    assert calls["open"] == 1
+    assert client._running is False
+    assert any(e[0] == "ai_error" and e[1]["code"] == "E_AI_PROTO_VER"
+               for e in events)
+
+
+def test_run_waits_for_missing_socket_without_error_log(monkeypatch, caplog):
+    class FakeConfig:
+        def get(self, section, key):
+            return {
+                ("ai", "socket"): "/run/pistelink/ai.sock",
+                ("ai", "reconnect_min_s"): 0.01,
+                ("ai", "reconnect_max_s"): 0.01,
+            }[(section, key)]
+
+    async def fake_sleep(self, _seconds):
+        self._running = False
+
+    async def fake_open(_path):
+        raise AssertionError("missing socket should be checked before connect")
+
+    async def scenario():
+        monkeypatch.setattr(ai_io, "get_config", lambda: FakeConfig())
+        monkeypatch.setattr(ai_io, "_socket_exists", lambda _path: False)
+        monkeypatch.setattr(AIClient, "_sleep", fake_sleep)
+        monkeypatch.setattr(ai_io.asyncio, "open_unix_connection", fake_open,
+                            raising=False)
+        caplog.set_level(logging.DEBUG, logger=ai_io.__name__)
+        client = AIClient()
+        await client.run()
+
+    asyncio.run(scenario())
+    assert "AI socket not found" in caplog.text
+    assert "AI socket error" not in caplog.text
 
 
 def test_handshake_non_ack_first_packet_aborts(monkeypatch):

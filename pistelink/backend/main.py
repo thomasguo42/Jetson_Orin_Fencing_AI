@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -15,7 +16,7 @@ from .audio import AudioPlayer
 from .config import get_config
 from .models import CurrentMatch, MatchState, Signal, temp_result_from_lights
 from .serial_io import SerialReader, parse_light_signals
-from .storage import create_match_dir, remove_match_dir, write_json_txt
+from .storage import create_match_dir, match_dir, remove_match_dir, write_json_txt
 from .uploader import Uploader
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,8 @@ audio: AudioPlayer | None = None
 uploader: Uploader | None = None
 
 _settle_timeout_task: asyncio.Task | None = None
+_timed_out_matches: dict[str, tuple[CurrentMatch, int]] = {}
+_MAX_TIMED_OUT_BACKFILLS = 16
 
 
 def _cancel_settle_timeout():
@@ -41,6 +44,115 @@ def _cancel_settle_timeout():
     if _settle_timeout_task is not None:
         _settle_timeout_task.cancel()
         _settle_timeout_task = None
+
+
+def _snapshot_match(src: CurrentMatch) -> CurrentMatch:
+    snap = CurrentMatch()
+    snap.match_id = src.match_id
+    snap.state = src.state
+    snap.begin_ts = src.begin_ts
+    snap.voice_end_ts = src.voice_end_ts
+    snap.weapon = src.weapon
+    snap.sensor = src.sensor
+    snap.signals = [
+        Signal(fight=s.fight, source=s.source, signal_ts=s.signal_ts)
+        for s in src.signals
+    ]
+    snap.result_audio_announced = src.result_audio_announced
+    snap.result_audio_done = src.result_audio_done
+    snap.ai_result_received = src.ai_result_received
+    return snap
+
+
+def _remember_timed_out_match(match_id: str, match_snapshot: CurrentMatch,
+                              offset_ms: int):
+    if not match_id:
+        return
+    _timed_out_matches[match_id] = (match_snapshot, offset_ms)
+    while len(_timed_out_matches) > _MAX_TIMED_OUT_BACKFILLS:
+        oldest = next(iter(_timed_out_matches))
+        _timed_out_matches.pop(oldest, None)
+
+
+def _result_code(payload: dict) -> int:
+    try:
+        return int(payload.get("result_code", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _apply_corrected_signals(target: CurrentMatch, payload: dict) -> int:
+    """Apply optional AI-corrected hit timestamps before json.txt backfill.
+
+    The v1.1 protocol allows AI to provide corrected signal timestamps but does
+    not prescribe a field name. Keep this intentionally narrow: only explicit
+    corrected_* lists are accepted, and entries update by list index.
+    """
+    corrections = payload.get("corrected_signals")
+    if corrections is None:
+        corrections = payload.get("corrected_list")
+    if not isinstance(corrections, list):
+        return 0
+
+    changed = 0
+    for entry in corrections:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            index = int(entry.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if index < 0 or index >= len(target.signals):
+            continue
+        ts = entry.get("timeStamp", entry.get("signal_ts"))
+        try:
+            signal_ts = int(ts)
+        except (TypeError, ValueError):
+            continue
+        target.signals[index].signal_ts = signal_ts
+        changed += 1
+    return changed
+
+
+def _video_path_in_match_dir(match_id: str, video_path: str) -> bool:
+    try:
+        path = Path(video_path).expanduser()
+        if not path.is_absolute():
+            return False
+        resolved_path = path.resolve(strict=False)
+        resolved_dir = match_dir(match_id).resolve(strict=False)
+        resolved_path.relative_to(resolved_dir)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _validate_match_result_video_path(match_id: str, payload: dict):
+    video_path = str(payload.get("video_path") or "")
+    if video_path and not _video_path_in_match_dir(match_id, video_path):
+        add_log("warning",
+                f"E_VIDEO_OUT_OF_DIR: video path outside match dir: {video_path}")
+
+
+def _backfill_timed_out_match(match_id: str, payload: dict) -> bool:
+    item = _timed_out_matches.get(match_id)
+    if item is None:
+        return False
+
+    snap, offset_ms = item
+    result_code = _result_code(payload)
+    changed = _apply_corrected_signals(snap, payload)
+    write_json_txt(snap, result_code, offset_ms)
+    _validate_match_result_video_path(match_id, payload)
+    add_log("info",
+            f"Late AI result backfilled for timed-out match {match_id}: "
+            f"result_code={result_code}, corrected_signals={changed}")
+    _timed_out_matches.pop(match_id, None)
+    ws_push_sync({
+        "type": "match_state", "state": "idle", "match_id": "",
+        "finalized": match_id, "late_ai_backfill": True,
+    })
+    return True
 
 
 def _bg(coro):
@@ -214,7 +326,9 @@ async def _settle_timeout(match_id: str, offset_ms: int, timeout_s: float,
     if match.state != MatchState.SETTLING or match.match_id != match_id:
         return
     result_audio_already_announced = match.result_audio_announced
+    timeout_snapshot = _snapshot_match(match)
     write_json_txt(match, 0, offset_ms)  # result_code=0: AI timed out
+    _remember_timed_out_match(match_id, timeout_snapshot, offset_ms)
     add_log("warning",
             f"AI result timeout ({timeout_s}s) for {match_id}, "
             f"finalized with result_code=0")
@@ -223,9 +337,9 @@ async def _settle_timeout(match_id: str, offset_ms: int, timeout_s: float,
     ws_push_sync({"type": "match_state", "state": "idle", "match_id": "",
                   "finalized": match_id})
     match.reset()
-    # Match state is finalized; announce the electrical light result (the stored
-    # json result stays 0 = AI undetermined). Decoupled from state: on_audio_done
-    # is a no-op now that state is idle, so a late match_result is ignored.
+    # Match state is finalized; announce the electrical light result. If AI
+    # answers late, §10.4/§13 still allow json.txt to be backfilled from the
+    # snapshot kept above, but that must not replay result audio.
     sound = _winner_audio(temp_result)
     if sound and audio and not result_audio_already_announced:
         audio.play(sound)
@@ -242,13 +356,15 @@ async def _cancel_match(notify_ai: bool = True):
 
     mid = match.match_id
     match.reset()
+    if mid:
+        _timed_out_matches.pop(mid, None)
 
     if audio:
         audio.clear()
     if mid:
         remove_match_dir(mid)
-    if notify_ai and ai_client and ai_client.connected:
-        await ai_client.send("match_cancel", {}, match_id=mid or "")
+    if mid and notify_ai and ai_client and ai_client.connected:
+        await ai_client.send("match_cancel", {}, match_id=mid)
 
     ws_push_sync({"type": "match_state", "state": match.state.value, "match_id": ""})
 
@@ -294,6 +410,9 @@ async def on_ai_event(event_type: str, payload: dict, _match_id: str):
 
     elif event_type == "match_result":
         if match.state not in (MatchState.PLAYING, MatchState.SETTLING):
+            late_match_id = str(_match_id or payload.get("match_id") or "")
+            if late_match_id and _backfill_timed_out_match(late_match_id, payload):
+                return
             # E_AI_RESULT_NO_MATCH: result arrived with no live match.
             add_log("warning", f"match_result in state {match.state.value}, ignoring")
             return
@@ -302,18 +421,17 @@ async def on_ai_event(event_type: str, payload: dict, _match_id: str):
         match.state = MatchState.SETTLING
         match.ai_result_received = True
         winner = payload.get("winner", "tie")
-        result_code = payload.get("result_code", 0)
+        result_code = _result_code(payload)
+        corrected = _apply_corrected_signals(match, payload)
 
         # 回填: rewrite json.txt with the authoritative AI result code.
         config = get_config()
         write_json_txt(match, result_code, config.video_sync_offset_ms)
+        _validate_match_result_video_path(match.match_id, payload)
 
-        video_path = payload.get("video_path", "")
-        if video_path and str(match.match_id) not in video_path:
-            add_log("warning",
-                    f"E_VIDEO_OUT_OF_DIR: video path outside match dir: {video_path}")
-
-        add_log("info", f"Match result: winner={winner} result_code={result_code}")
+        add_log("info",
+                f"Match result: winner={winner} result_code={result_code} "
+                f"corrected_signals={corrected}")
         ws_push_sync({
             "type": "match_state", "state": match.state.value,
             "match_id": match.match_id, "winner": winner,
@@ -371,6 +489,7 @@ async def on_upload_progress(match_id: str, phase: str, sent: int,
 async def startup():
     global serial, ai_client, audio, uploader
 
+    config = get_config()
     audio = AudioPlayer(on_play_done=on_audio_done)
     ai_client = AIClient(on_event=on_ai_event)
     serial = SerialReader(on_main_frame=on_main_frame, on_hit_frame=on_hit_frame)
@@ -382,7 +501,11 @@ async def startup():
     api_state["uploader"] = uploader
 
     _bg(serial.run())
-    _bg(ai_client.run())
+    if config.get("ai", "enabled", True):
+        _bg(ai_client.run())
+    else:
+        add_log("info", "AI socket disabled by config")
+        logger.info("AI socket disabled by config")
     _bg(audio.run())
     _bg(uploader.run())
     # Re-queue uploads that were requested but not confirmed before a restart

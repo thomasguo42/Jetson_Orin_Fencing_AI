@@ -123,7 +123,7 @@ ARM_EXTENSION_X_DISTANCE_THRESHOLD = 0.45
 ARM_EXTENSION_MIN_FRAMES = 2
 ARM_EXTENSION_MAX_HIT_GAP_FRAMES = 8
 ARM_EXTENSION_STRAIGHT_ANGLE_DEG = 140.0
-ARM_EXTENSION_HARMFUL_MAX_FRAMES = 20
+ARM_EXTENSION_HARMFUL_MAX_FRAMES = 12
 ARM_EXTENSION_HARMFUL_EARLY_END_FRAMES = 8
 ARM_EXTENSION_HARMFUL_BODY_ANGLE_DEG = 70.0
 ARM_EXTENSION_RESPONSE_BUFFER_FRAMES = 6
@@ -1731,6 +1731,41 @@ class ArmExtensionInterval:
     is_harmful_overlong: bool
     is_harmful_early_end: bool
 
+
+def _intervals_overlap(a: ArmExtensionInterval, b: ArmExtensionInterval) -> bool:
+    return a.end_frame >= b.start_frame and b.end_frame >= a.start_frame
+
+
+def _has_opponent_non_harmful_extension_during(
+    interval: ArmExtensionInterval,
+    opponent_extensions: List[ArmExtensionInterval],
+) -> bool:
+    for opponent in opponent_extensions:
+        if opponent.is_harmful_overlong or opponent.is_harmful_early_end:
+            continue
+        if _intervals_overlap(interval, opponent):
+            return True
+    return False
+
+
+def _suppress_unopposed_overlong_arm_extensions(
+    side_extensions: List[ArmExtensionInterval],
+    opponent_extensions: List[ArmExtensionInterval],
+    side_label: str,
+) -> None:
+    for interval in side_extensions:
+        if not interval.is_harmful_overlong:
+            continue
+        if _has_opponent_non_harmful_extension_during(interval, opponent_extensions):
+            continue
+        interval.is_harmful_overlong = False
+        _debug(
+            f"[ArmExt:{side_label}] overlong interval {interval.start_frame}-{interval.end_frame} "
+            "reclassified as non-harmful: opponent has no non-harmful arm extension "
+            "overlapping this interval"
+        )
+
+
 def detect_arm_extension(xdata: Dict, ydata: Dict, is_left_fencer: bool,
                         fps: float = DEFAULT_FPS,
                         hit_frame: Optional[int] = None,
@@ -2541,6 +2576,22 @@ def referee_decision(phrase: FencingPhrase, left_xdata: Dict, left_ydata: Dict,
 
     result['left_arm_extensions'] = [asdict(e) for e in left_extensions]
     result['right_arm_extensions'] = [asdict(e) for e in right_extensions]
+
+    no_pause_no_blade = not left_pauses and not right_pauses and not effective_blade_contact
+    has_penalizing_lunge = any(interval.is_penalizing for interval in left_lunges + right_lunges)
+    if no_pause_no_blade and not has_penalizing_lunge:
+        _suppress_unopposed_overlong_arm_extensions(
+            left_extensions,
+            right_extensions,
+            "left",
+        )
+        _suppress_unopposed_overlong_arm_extensions(
+            right_extensions,
+            left_extensions,
+            "right",
+        )
+        result['left_arm_extensions'] = [asdict(e) for e in left_extensions]
+        result['right_arm_extensions'] = [asdict(e) for e in right_extensions]
 
     left_harmful_extensions = [
         e for e in left_extensions

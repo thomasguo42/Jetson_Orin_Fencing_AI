@@ -18,10 +18,12 @@ from backend.models import CurrentMatch
 
 class FakeSerial:
     running = True
+    connected = True
     last_frame_time = 0
     crc_errors = 0
     connection_errors = 0
     dup_discarded = 0
+    last_error = ""
 
 
 class FakeAI:
@@ -98,10 +100,18 @@ def test_healthz_reflects_connections(app_env):
     out = asyncio.run(api.healthz())
     assert out["serial"] == "ok" and out["ai"] == "ok"
 
-    app_env["state"]["serial"].running = False
+    app_env["state"]["serial"].connected = False
     app_env["state"]["ai"].connected = False
     out = asyncio.run(api.healthz())
     assert out["serial"] == "error" and out["ai"] == "error"
+
+
+def test_healthz_reports_disabled_ai(app_env):
+    app_env["cfg"]._data["ai"]["enabled"] = False
+    app_env["state"]["ai"].connected = False
+    out = asyncio.run(api.healthz())
+    assert out["ai"] == "disabled"
+    assert asyncio.run(api.api_status())["ai"]["enabled"] is False
 
 
 # ── matches list ──────────────────────────────────────────────────────────

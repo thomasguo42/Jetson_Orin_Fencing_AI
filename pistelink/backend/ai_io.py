@@ -6,6 +6,7 @@ import logging
 import sys
 import time
 from asyncio import StreamReader, StreamWriter
+from pathlib import Path
 
 from .config import get_config
 
@@ -14,6 +15,35 @@ logger = logging.getLogger(__name__)
 MAX_FRAME_BYTES = 64 * 1024
 HEARTBEAT_IDLE_S = 2
 HEARTBEAT_TIMEOUT_S = 6
+
+
+def _socket_exists(socket_path: str) -> bool:
+    try:
+        Path(socket_path).stat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def _log_missing_socket(socket_path: str, delay: float,
+                        already_logged: bool) -> bool:
+    if not already_logged:
+        logger.warning(
+            "AI socket not found at %s; waiting for AI service "
+            "(retrying in %ds)",
+            socket_path,
+            delay,
+        )
+        return True
+
+    logger.debug(
+        "AI socket still missing at %s; retrying in %ds",
+        socket_path,
+        delay,
+    )
+    return True
 
 
 class AIClient:
@@ -26,6 +56,7 @@ class AIClient:
         self._last_recv_time: float = 0
         self._last_send_time: float = 0
         self._handshake_done: bool = False
+        self._fatal_protocol_error: bool = False
         self._write_lock = asyncio.Lock()
         self.bytes_sent: int = 0
         self.bytes_recv: int = 0
@@ -50,12 +81,35 @@ class AIClient:
 
         self._running = True
         delay = rmin
+        missing_socket_logged = False
 
         while self._running:
+            if not _socket_exists(socket_path):
+                missing_socket_logged = _log_missing_socket(
+                    socket_path,
+                    delay,
+                    missing_socket_logged,
+                )
+                await self._sleep(delay)
+                delay = min(delay * 2, rmax)
+                continue
+
             try:
                 await self._connect(socket_path)
-                delay = rmin
-                await self._read_loop()
+                missing_socket_logged = False
+                if self._fatal_protocol_error:
+                    logger.error("AI protocol error is fatal; reconnect disabled")
+                elif not self._handshake_done:
+                    raise ConnectionError("AI handshake failed")
+                else:
+                    delay = rmin
+                    await self._read_loop()
+            except FileNotFoundError:
+                missing_socket_logged = _log_missing_socket(
+                    socket_path,
+                    delay,
+                    missing_socket_logged,
+                )
             except (OSError, asyncio.IncompleteReadError, ConnectionError) as e:
                 logger.error("AI socket error (%s), reconnecting in %ds", e, delay)
             except asyncio.CancelledError:
@@ -66,6 +120,10 @@ class AIClient:
             if self._writer:
                 self._writer.close()
                 self._writer = None
+
+            if self._fatal_protocol_error:
+                self._running = False
+                break
 
             await self._sleep(delay)
             delay = min(delay * 2, rmax)
@@ -102,6 +160,7 @@ class AIClient:
             logger.error("AI protocol version mismatch: ai=%d, us=1", ai_proto_v)
             writer.close()
             self.connected = False
+            self._fatal_protocol_error = True
             if self._on_event:
                 await self._on_event("ai_error", {
                     "code": "E_AI_PROTO_VER",

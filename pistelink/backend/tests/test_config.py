@@ -9,7 +9,13 @@ def test_defaults_when_file_missing(tmp_path):
     cfg = Config(str(tmp_path / "nope.toml"))
     assert cfg.get("http", "host") == "127.0.0.1"
     assert cfg.get("upload", "post_upload_action") == "delete_video_only"
+    assert cfg.get("ai", "enabled") is True
     assert cfg.video_sync_offset_ms == 0
+
+
+def test_missing_config_logs_warning(tmp_path, caplog):
+    Config(str(tmp_path / "missing.toml"))
+    assert "Config file not found" in caplog.text
 
 
 def test_file_overrides_defaults(tmp_path):

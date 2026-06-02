@@ -1,6 +1,7 @@
 """Audio playback — subprocess on Linux, MCI (winmm) on Windows."""
 
 import asyncio
+from contextlib import suppress
 import logging
 import os
 import shutil
@@ -26,6 +27,13 @@ _PLAYER_ARGS: dict[str, list[str]] = {
 _MCI_ALIAS = "pistelink_audio"
 
 
+def _as_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _find_player() -> str | None:
     """Return a player name for Linux, or None on Windows (uses MCI instead)."""
     if sys.platform == "win32":
@@ -34,6 +42,60 @@ def _find_player() -> str | None:
         if shutil.which(name):
             return name
     return None
+
+
+def _iter_alsa_cards() -> list[tuple[int, str, str]]:
+    """Return ALSA cards as (index, id, description) from /proc/asound/cards."""
+    cards_path = Path("/proc/asound/cards")
+    if not cards_path.exists():
+        return []
+    cards: list[tuple[int, str, str]] = []
+    try:
+        lines = cards_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        # Example: " 0 [Device         ]: USB-Audio - USB2.0 Device"
+        stripped = line.lstrip()
+        if not stripped or not stripped[0].isdigit() or "[" not in stripped or "]" not in stripped:
+            continue
+        try:
+            index = int(stripped.split(None, 1)[0])
+        except (IndexError, ValueError):
+            continue
+        card_id = stripped.split("[", 1)[1].split("]", 1)[0].strip()
+        cards.append((index, card_id, stripped))
+    return cards
+
+
+def _alsa_card_id_exists(card_id: str) -> bool:
+    return any(existing == card_id for _index, existing, _desc in _iter_alsa_cards())
+
+
+def _auto_alsa_device() -> str | None:
+    if _alsa_card_id_exists("pistelink"):
+        return "plughw:CARD=pistelink,DEV=0"
+    for index, _card_id, desc in _iter_alsa_cards():
+        if "USB-Audio" in desc:
+            return f"plughw:{index},0"
+    return None
+
+
+def _resolve_audio_device(configured: str) -> str:
+    device = (configured or "").strip()
+    if not device or device == "default":
+        return device
+    if device == "auto":
+        return _auto_alsa_device() or "default"
+    if "CARD=pistelink" in device and not _alsa_card_id_exists("pistelink"):
+        fallback = _auto_alsa_device()
+        if fallback:
+            logger.warning(
+                "Configured ALSA card 'pistelink' is not present; using USB audio fallback %s",
+                fallback,
+            )
+            return fallback
+    return device
 
 
 def _mci_play(path: str):
@@ -120,7 +182,7 @@ class AudioPlayer:
         default (used on dev hosts where PulseAudio is available).
         """
         cmd = list(_PLAYER_ARGS[self._player])
-        device = (get_config().get("audio", "device", "default") or "").strip()
+        device = _resolve_audio_device(get_config().get("audio", "device", "default"))
         if device and device != "default" and self._player == "mpg123":
             cmd += ["-o", "alsa", "-a", device]
         elif device and device != "default" and self._player == "gst-play-1.0":
@@ -135,16 +197,31 @@ class AudioPlayer:
         """Play via external subprocess (Linux)."""
         cmd = self._build_cmd(path)
         logger.info("Audio play: %s", " ".join(cmd))
+        proc: asyncio.subprocess.Process | None = None
         try:
-            self._current_proc = await asyncio.create_subprocess_exec(
+            proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             )
-            _stdout, stderr = await self._current_proc.communicate()
+            self._current_proc = proc
+            timeout_s = _as_float(get_config().get("audio", "playback_timeout_s", 10), 10)
+            if timeout_s > 0:
+                try:
+                    _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+                except asyncio.TimeoutError:
+                    logger.error("Audio playback timed out after %.1fs: %s", timeout_s, " ".join(cmd))
+                    with suppress(Exception):
+                        proc.kill()
+                    with suppress(Exception):
+                        await proc.communicate()
+                    return
+            else:
+                _stdout, stderr = await proc.communicate()
             stderr_text = (stderr or b"").decode("utf-8", errors="replace").strip()
-            if self._current_proc.returncode != 0 or "ERROR" in stderr_text:
+            returncode = proc.returncode
+            if returncode != 0 or "ERROR" in stderr_text:
                 logger.error(
                     "Audio playback failed rc=%s: %s",
-                    self._current_proc.returncode,
+                    returncode,
                     stderr_text or "(no stderr)",
                 )
             elif stderr_text:
@@ -152,7 +229,8 @@ class AudioPlayer:
         except Exception as e:
             logger.error("Audio playback error: %s", e)
         finally:
-            self._current_proc = None
+            if self._current_proc is proc:
+                self._current_proc = None
 
     def play(self, filename: str):
         self._queue.put_nowait(filename)

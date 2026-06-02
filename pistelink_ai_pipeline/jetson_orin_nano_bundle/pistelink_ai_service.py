@@ -221,13 +221,41 @@ class PisteLinkAIService:
             self.socket_path.unlink()
 
     def _secure_socket_file(self) -> None:
-        os.chmod(self.socket_path, 0o600)
+        owner = os.environ.get("PISTELINK_AI_SOCKET_OWNER", "").strip()
+        group = os.environ.get("PISTELINK_AI_SOCKET_GROUP", "").strip()
+        mode_text = os.environ.get("PISTELINK_AI_SOCKET_MODE", "0660").strip()
+
+        uid = -1
+        gid = -1
+        if owner:
+            try:
+                uid = pwd.getpwnam(owner).pw_uid
+            except KeyError:
+                print(f"[PISTELINK] socket owner not found: {owner!r}", flush=True)
+        if group:
+            try:
+                gid = grp.getgrnam(group).gr_gid
+            except KeyError:
+                print(f"[PISTELINK] socket group not found: {group!r}", flush=True)
+        else:
+            try:
+                gid = self.socket_path.parent.stat().st_gid
+            except OSError:
+                gid = -1
+
+        if uid != -1 or gid != -1:
+            try:
+                os.chown(self.socket_path, uid, gid)
+            except PermissionError:
+                print("[PISTELINK] socket chown skipped: permission denied", flush=True)
+            except OSError as exc:
+                print(f"[PISTELINK] socket chown skipped: {exc}", flush=True)
+
         try:
-            uid = pwd.getpwnam("nvidia").pw_uid
-            gid = grp.getgrnam("nvidia").gr_gid
-            os.chown(self.socket_path, uid, gid)
-        except Exception:
-            pass
+            mode = int(mode_text, 8)
+        except ValueError:
+            mode = 0o660
+        os.chmod(self.socket_path, mode)
 
     def _replace_client(self, conn: socket.socket) -> None:
         with self._client_lock:
@@ -294,12 +322,16 @@ class PisteLinkAIService:
         except TimeoutError as exc:
             print(f"[PISTELINK] {exc}")
         finally:
+            should_cancel_active = False
             with self._client_lock:
                 if self._client is client:
                     self._client = None
+                    should_cancel_active = True
                 if self._client_socket is conn:
                     self._client_socket = None
             self._close_socket(conn)
+            if should_cancel_active:
+                self._cancel_active_recording("backend_disconnected")
             print("[PISTELINK] backend disconnected")
 
     def _dispatch(self, message: Dict[str, Any]) -> None:
@@ -649,8 +681,9 @@ class PisteLinkAIService:
                         processing_error=None,
                     )
                     result_payload["video_transcode_pending"] = True
-                    self._send("match_result", result_payload, match_id=ctx.match_id)
-                    result_sent = True
+                    if not self._context_cancelled(ctx):
+                        self._send("match_result", result_payload, match_id=ctx.match_id)
+                        result_sent = True
 
                 transcode_thread.join()
                 if transcode_holder.get("error"):
@@ -689,6 +722,10 @@ class PisteLinkAIService:
                     processing_error=str(exc),
                 )
 
+        if self._context_cancelled(ctx):
+            self._clear_active_context(ctx)
+            return
+
         debug_artifacts_requested = self._should_write_debug_artifacts(
             ctx,
             needs_visual_row,
@@ -701,8 +738,9 @@ class PisteLinkAIService:
             result_payload["debug_artifacts_pending"] = True
             result_payload["debug_artifacts_dir"] = str(self._debug_artifacts_root(ctx))
 
-        if not result_sent:
+        if not result_sent and not self._context_cancelled(ctx):
             self._send("match_result", result_payload, match_id=ctx.match_id)
+            result_sent = True
         if debug_artifacts_requested:
             self._start_debug_artifact_job(
                 ctx,
@@ -712,9 +750,7 @@ class PisteLinkAIService:
                 active_start_frame=active_start_frame,
                 analysis_fps=analysis_fps,
             )
-        with self._state_lock:
-            if self._active_match is ctx:
-                self._active_match = None
+        self._clear_active_context(ctx)
 
     def _run_visual_analysis(
         self,
@@ -1050,10 +1086,31 @@ class PisteLinkAIService:
         if ctx is None:
             print(f"[PISTELINK] ignoring {message.get('type')} with no active match")
             return None
+        if ctx.cancelled:
+            print(f"[PISTELINK] ignoring {message.get('type')} for cancelled match {ctx.match_id!r}")
+            return None
         if match_id and ctx.match_id != match_id:
             print(f"[PISTELINK] ignoring message for {match_id!r}; active match is {ctx.match_id!r}")
             return None
         return ctx
+
+    def _context_cancelled(self, ctx: MatchContext) -> bool:
+        with self._state_lock:
+            return ctx.cancelled or self._active_match is not ctx
+
+    def _clear_active_context(self, ctx: MatchContext) -> None:
+        with self._state_lock:
+            if self._active_match is ctx:
+                self._active_match = None
+
+    def _cancel_active_recording(self, reason: str) -> None:
+        with self._state_lock:
+            ctx = self._active_match
+            if ctx is None or ctx.finalizing:
+                return
+            self._cancel_context_locked(ctx, reason)
+            if self._active_match is ctx:
+                self._active_match = None
 
     def _cancel_context_locked(self, ctx: MatchContext, reason: str) -> None:
         ctx.cancelled = True

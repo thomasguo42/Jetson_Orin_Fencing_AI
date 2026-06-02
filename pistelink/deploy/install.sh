@@ -10,16 +10,46 @@
 # (kept explicit so you choose Docker vs bare systemd).
 set -euo pipefail
 
-OWNER="${PISTELINK_OWNER:-nvidia}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root (sudo)"; exit 1; }
+
+detect_owner() {
+  if [ -n "${PISTELINK_OWNER:-}" ]; then
+    printf '%s\n' "$PISTELINK_OWNER"
+    return
+  fi
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && id "$SUDO_USER" >/dev/null 2>&1; then
+    printf '%s\n' "$SUDO_USER"
+    return
+  fi
+  if id nvidia >/dev/null 2>&1; then
+    printf '%s\n' "nvidia"
+    return
+  fi
+  if [ -n "${LOGNAME:-}" ] && [ "$LOGNAME" != "root" ] && id "$LOGNAME" >/dev/null 2>&1; then
+    printf '%s\n' "$LOGNAME"
+    return
+  fi
+  printf '%s\n' "root"
+}
+
+OWNER="$(detect_owner)"
 id "$OWNER" >/dev/null 2>&1 || { echo "owner user '$OWNER' not found (set PISTELINK_OWNER)"; exit 1; }
+OWNER_GROUP="$(id -gn "$OWNER")"
+
+echo "==> service user/group"
+echo "    owner: $OWNER:$OWNER_GROUP"
+for group in dialout audio video render; do
+  if getent group "$group" >/dev/null 2>&1; then
+    usermod -aG "$group" "$OWNER" || true
+  fi
+done
 
 echo "==> runtime directories (owner $OWNER)"
-install -d -m 0750 -o "$OWNER" -g "$OWNER" /etc/pistelink
-install -d -m 0750 -o "$OWNER" -g "$OWNER" /var/lib/pistelink
-install -d -m 0700 -o "$OWNER" -g "$OWNER" /run/pistelink
+install -d -m 0750 -o "$OWNER" -g "$OWNER_GROUP" /etc/pistelink
+install -d -m 0750 -o "$OWNER" -g "$OWNER_GROUP" /var/lib/pistelink
+install -d -m 0770 -o "$OWNER" -g "$OWNER_GROUP" /run/pistelink
 
 echo "==> brltty (braille daemon hijacks the CH340 1a86:7523 — remove it)"
 # brltty ships a udev rule that claims 1a86:7523, so the CH340 never gets a tty
@@ -54,16 +84,30 @@ install -m 0644 "$SCRIPT_DIR/udev/99-pistelink-audio.rules" /etc/udev/rules.d/99
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=tty || true
 udevadm trigger --subsystem-match=sound || true
+CH340_COUNT="$(find /sys/bus/usb/devices -maxdepth 2 -name idVendor -exec sh -c '
+  count=0
+  for vendor_path do
+    dir=$(dirname "$vendor_path")
+    if [ "$(cat "$dir/idVendor" 2>/dev/null)" = "1a86" ] && [ "$(cat "$dir/idProduct" 2>/dev/null)" = "7523" ]; then
+      count=$((count + 1))
+    fi
+  done
+  printf "%s" "$count"
+' sh {} + 2>/dev/null || printf '0')"
+if [ "${CH340_COUNT:-0}" -gt 1 ]; then
+  echo "    WARNING: more than one CH340 1a86:7523 device is attached; add a serial/path match to 99-pistelink-mcu.rules" >&2
+fi
 
 echo "==> tmpfiles.d (recreate /run/pistelink on every boot)"
-sed "s/nvidia nvidia/$OWNER $OWNER/g" "$SCRIPT_DIR/tmpfiles/pistelink.conf" >/etc/tmpfiles.d/pistelink.conf
+sed "s/nvidia nvidia/$OWNER $OWNER_GROUP/g" "$SCRIPT_DIR/tmpfiles/pistelink.conf" >/etc/tmpfiles.d/pistelink.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/pistelink.conf
 
 echo "==> config template"
 if [ -f /etc/pistelink/config.toml ]; then
   echo "    /etc/pistelink/config.toml exists — left untouched"
 else
-  install -m 0600 -o "$OWNER" -g "$OWNER" "$SCRIPT_DIR/config.example.toml" /etc/pistelink/config.toml
+  install -m 0600 -o "$OWNER" -g "$OWNER_GROUP" "$SCRIPT_DIR/config.example.toml" /etc/pistelink/config.toml
+  sed -i "s#/home/nvidia/.ssh/id_ed25519#/home/$OWNER/.ssh/id_ed25519#g" /etc/pistelink/config.toml
   echo "    installed /etc/pistelink/config.toml (SFTP server pre-filled; upload key"
   echo "    expected at /home/$OWNER/.ssh/id_ed25519 — see step below)"
 fi
@@ -72,8 +116,8 @@ if [ "${PISTELINK_KIOSK:-0}" = "1" ]; then
   echo "==> kiosk (full-screen Chromium on boot, opt-in via PISTELINK_KIOSK=1)"
   UID_OWNER="$(id -u "$OWNER")"
   USER_UNIT_DIR="/home/$OWNER/.config/systemd/user"
-  install -d -m 0755 -o "$OWNER" -g "$OWNER" "$USER_UNIT_DIR"
-  install -m 0644 -o "$OWNER" -g "$OWNER" \
+  install -d -m 0755 -o "$OWNER" -g "$OWNER_GROUP" "$USER_UNIT_DIR"
+  install -m 0644 -o "$OWNER" -g "$OWNER_GROUP" \
     "$SCRIPT_DIR/systemd/pistelink-kiosk.service" "$USER_UNIT_DIR/pistelink-kiosk.service"
   # Linger lets the user's systemd run (and the kiosk start) without an interactive login.
   loginctl enable-linger "$OWNER" || true
@@ -99,7 +143,7 @@ KEY="/home/$OWNER/.ssh/id_ed25519"
 if [ -f "$KEY" ]; then
   echo "    $KEY exists — left untouched"
 else
-  install -d -m 0700 -o "$OWNER" -g "$OWNER" "/home/$OWNER/.ssh"
+  install -d -m 0700 -o "$OWNER" -g "$OWNER_GROUP" "/home/$OWNER/.ssh"
   sudo -u "$OWNER" ssh-keygen -t ed25519 -N "" -C "pistelink@$(hostname)" -f "$KEY"
   echo "    generated $KEY"
 fi

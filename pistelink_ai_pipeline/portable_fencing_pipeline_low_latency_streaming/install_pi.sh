@@ -8,8 +8,8 @@ JETSON_TORCHVISION_WHEEL="https://pypi.jetson-ai-lab.io/jp6/cu126/+f/907/c4c1933
 
 export PATH="${HOME}/.local/bin:${PATH}"
 
-if ! python3 -m venv "${VENV_DIR}" 2>/dev/null; then
-  if ! python3 -m virtualenv -p python3 "${VENV_DIR}" 2>/dev/null; then
+if ! python3 -m venv --system-site-packages "${VENV_DIR}" 2>/dev/null; then
+  if ! python3 -m virtualenv --system-site-packages -p python3 "${VENV_DIR}" 2>/dev/null; then
     TMP_GET_PIP="$(mktemp)"
     if command -v curl >/dev/null 2>&1; then
       curl -fsSL https://bootstrap.pypa.io/get-pip.py -o "${TMP_GET_PIP}"
@@ -22,11 +22,12 @@ if ! python3 -m venv "${VENV_DIR}" 2>/dev/null; then
     python3 "${TMP_GET_PIP}" --user
     rm -f "${TMP_GET_PIP}"
     python3 -m pip install --user virtualenv
-    python3 -m virtualenv -p python3 "${VENV_DIR}"
+    python3 -m virtualenv --system-site-packages -p python3 "${VENV_DIR}"
   fi
 fi
 
 source "${VENV_DIR}/bin/activate"
+export PYTHONNOUSERSITE=1
 
 python -m pip install --upgrade pip wheel setuptools
 if [[ -f /etc/nv_tegra_release ]]; then
@@ -36,6 +37,10 @@ if [[ -f /etc/nv_tegra_release ]]; then
 else
   python -m pip install torch==2.5.1 torchvision==0.20.1
 fi
+python -m pip install \
+  typing-extensions filelock fsspec sympy networkx jinja2 \
+  psutil polars ultralytics-thop rich scipy==1.11.4 \
+  exceptiongroup threadpoolctl
 python -m pip install -r "${ROOT}/requirements.txt"
 
 echo

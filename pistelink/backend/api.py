@@ -51,18 +51,20 @@ async def index():
 
 @app.get("/healthz")
 async def healthz():
+    config = get_config()
     storage_free = 0
     try:
         storage_free = disk_usage()["free_mb"]
     except Exception:
         pass
 
-    serial_ok = bool(state.get("serial") and state["serial"].running)
+    serial_ok = bool(state.get("serial") and state["serial"].connected)
+    ai_enabled = bool(config.get("ai", "enabled", True))
     ai_ok = bool(state.get("ai") and state["ai"].connected)
 
     return {
         "serial": "ok" if serial_ok else "error",
-        "ai": "ok" if ai_ok else "error",
+        "ai": "disabled" if not ai_enabled else ("ok" if ai_ok else "error"),
         "storage_free_mb": storage_free,
     }
 
@@ -71,6 +73,7 @@ async def healthz():
 
 @app.get("/api/status")
 async def api_status():
+    config = get_config()
     match = state.get("current_match")
     serial_state = state.get("serial")
     ai_state = state.get("ai")
@@ -86,13 +89,16 @@ async def api_status():
         },
         "serial": {
             "device": get_config().get("serial", "device"),
-            "connected": serial_state.running if serial_state else False,
+            "connected": serial_state.connected if serial_state else False,
+            "reader_running": serial_state.running if serial_state else False,
             "last_frame_time": serial_state.last_frame_time if serial_state else 0,
             "crc_errors": serial_state.crc_errors if serial_state else 0,
             "connection_errors": serial_state.connection_errors if serial_state else 0,
             "dup_discarded": serial_state.dup_discarded if serial_state else 0,
+            "last_error": serial_state.last_error if serial_state else "",
         },
         "ai": {
+            "enabled": bool(config.get("ai", "enabled", True)),
             "connected": ai_state.connected if ai_state else False,
             "last_recv_time": ai_state.last_recv_time if ai_state else 0,
             "bytes_sent": ai_state.bytes_sent if ai_state else 0,

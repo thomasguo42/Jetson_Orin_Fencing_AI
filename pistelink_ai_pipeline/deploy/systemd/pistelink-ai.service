@@ -18,18 +18,24 @@ Group=thomas
 SupplementaryGroups=video audio render dialout
 WorkingDirectory=/home/thomas/fencing/pistelink_ai_pipeline/jetson_orin_nano_bundle
 Environment=PISTELINK_AI_SOCKET=/run/pistelink/ai.sock
+Environment=PISTELINK_RUNTIME_DIR=/run/pistelink
+Environment=PISTELINK_AI_SOCKET_GROUP=thomas
+Environment=PISTELINK_AI_SOCKET_MODE=0660
 Environment=PISTELINK_MATCH_ROOT=/var/lib/pistelink/matches
 Environment=PISTELINK_ANALYZER_ROOT=/home/thomas/fencing/pistelink_ai_pipeline/portable_fencing_pipeline_low_latency_streaming
 Environment=PISTELINK_ANALYZER_FISHEYE_BACKEND=none
 Environment=PISTELINK_ANALYZER_STARTUP_TIMEOUT=120
-Environment=FENCING_CAMERA_INDEX=0
 Environment=FENCING_CAMERA_WIDTH=1280
 Environment=FENCING_CAMERA_HEIGHT=720
 Environment=FENCING_CAMERA_FPS=30
 Environment=PYTHONNOUSERSITE=1
+RuntimeDirectory=pistelink
+RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
+UMask=0007
 ExecStart=/home/thomas/fencing/pistelink_ai_pipeline/jetson_orin_nano_bundle/run_pistelink_ai_service.sh
 Restart=always
-RestartSec=5
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target

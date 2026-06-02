@@ -129,6 +129,13 @@ def test_hit_frames_not_deduped():
     assert reader.dup_discarded == 0
 
 
+def test_reader_running_is_not_serial_connected_by_default():
+    reader = SerialReader()
+    reader._running = True
+    assert reader.running is True
+    assert reader.connected is False
+
+
 # ── Buffer framing: split frames across serial reads (粘包/拆包) ──────────────
 
 def test_split_hit_frame_survives_buffer_boundary():

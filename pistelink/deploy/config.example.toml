@@ -12,6 +12,7 @@ baud = 115200
 video_sync_offset_ms = 0     # UI-configurable, hot-reloaded (-500..+500)
 
 [ai]
+enabled = true
 socket = "/run/pistelink/ai.sock"
 reconnect_min_s = 1
 reconnect_max_s = 30
@@ -31,6 +32,7 @@ root = "/var/lib/pistelink"
 # or USB port. Use "plughw:0,3" for HDMI instead. Only honored by mpg123.
 # "default" keeps the player's own default (PulseAudio on a dev host).
 device = "plughw:CARD=pistelink,DEV=0"
+playback_timeout_s = 10
 
 [upload]
 host = "99.27.206.243"       # client SFTP server

@@ -1,5 +1,6 @@
 """Config loading from TOML with hot-reload for time-sensitive keys."""
 
+import logging
 import os
 try:
     import tomllib
@@ -8,11 +9,13 @@ except ModuleNotFoundError:  # Python < 3.11
 from typing import Any
 
 DEFAULT_CONFIG_PATH = "/etc/pistelink/config.toml"
+logger = logging.getLogger(__name__)
 
 DEFAULTS: dict[str, dict[str, Any]] = {
     "serial": {"device": "/dev/ttyUSB-mcu", "baud": 115200},
     "signal": {"video_sync_offset_ms": 0},
     "ai": {
+        "enabled": True,
         "socket": "/run/pistelink/ai.sock",
         "reconnect_min_s": 1,
         "reconnect_max_s": 30,
@@ -21,7 +24,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "result_timeout_s": 30,
     },
     "storage": {"root": "/var/lib/pistelink"},
-    "audio": {"device": "default"},
+    "audio": {"device": "default", "playback_timeout_s": 10},
     "upload": {
         "host": "",
         "port": 22,
@@ -57,9 +60,28 @@ class Config:
             for section in merged:
                 if section in file_data:
                     merged[section].update(file_data[section])
-        except (FileNotFoundError, OSError):
-            pass
+        except FileNotFoundError:
+            if os.environ.get("PISTELINK_DEBUG") == "1":
+                self._apply_debug_missing_file_defaults(merged)
+                logger.warning(
+                    "Config file not found: %s; using debug defaults rooted at %s",
+                    self._path, merged["storage"]["root"])
+            else:
+                logger.warning("Config file not found: %s; using built-in defaults",
+                               self._path)
+        except OSError as e:
+            logger.warning("Could not read config file %s: %s; using built-in defaults",
+                           self._path, e)
         self._data = merged
+
+    def _apply_debug_missing_file_defaults(self, merged: dict[str, dict[str, Any]]):
+        root = os.path.dirname(os.path.abspath(self._path))
+        if not root:
+            return
+        os.makedirs(root, exist_ok=True)
+        merged["storage"]["root"] = root
+        merged["ai"]["socket"] = os.path.join(root, "ai.sock")
+        merged["audio"]["device"] = "default"
 
     def _check_reload(self):
         try:

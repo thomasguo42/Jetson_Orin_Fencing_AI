@@ -102,6 +102,8 @@ class SerialReader:
         self._running = False
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
+        self._connected = False
+        self.last_error: str = ""
         self.crc_errors: int = 0
         self.connection_errors: int = 0
         self.dup_discarded: int = 0
@@ -110,6 +112,10 @@ class SerialReader:
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
 
     async def run(self):
         if sys.platform == "win32":
@@ -130,15 +136,34 @@ class SerialReader:
                 self._reader, self._writer = await serial_asyncio.open_serial_connection(
                     url=device, baudrate=baud, bytesize=8, parity="N", stopbits=1
                 )
+                self._connected = True
+                self.last_error = ""
                 logger.info("Serial connected: %s @ %d", device, baud)
                 reconnect_delay = 2
                 await self._read_loop()
+                self._close_writer()
+                if self._running:
+                    self._connected = False
+                    self.connection_errors += 1
+                    self.last_error = "serial port closed"
+                    logger.warning(
+                        "Serial disconnected: %s, reconnecting in %ds",
+                        device,
+                        reconnect_delay,
+                    )
+                    await self._sleep(reconnect_delay)
+                    reconnect_delay = min(reconnect_delay * 2, 30)
             except (OSError, serial.SerialException) as e:
+                self._connected = False
+                self.last_error = str(e)
+                self._close_writer()
                 logger.error("Serial error (%s), reconnecting in %ds", e, reconnect_delay)
                 self.connection_errors += 1
                 await self._sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, 30)
             except asyncio.CancelledError:
+                self._connected = False
+                self._close_writer()
                 break
 
     async def _read_loop(self):
@@ -238,5 +263,14 @@ class SerialReader:
 
     async def stop(self):
         self._running = False
+        self._connected = False
+        self._close_writer()
+
+    def _close_writer(self):
         if self._writer:
-            self._writer.close()
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+        self._writer = None
+        self._reader = None

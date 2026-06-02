@@ -1,0 +1,4 @@
+# Pin the CH340 USB-serial adapter to a stable name /dev/ttyUSB-mcu so the
+# config never depends on enumeration order. Install to /etc/udev/rules.d/.
+# If several CH340 devices are present, add ATTRS{serial}=="..." to disambiguate.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="ttyUSB-mcu", MODE="0660", GROUP="dialout"

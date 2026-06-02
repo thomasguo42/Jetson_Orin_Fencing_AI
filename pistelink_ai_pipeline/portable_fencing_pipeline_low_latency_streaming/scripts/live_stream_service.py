@@ -237,15 +237,18 @@ class LiveTrackingSession:
         phrase_dir: Path,
         output_dir: Path,
         txt_path: Path,
-        video_path: Path,
+        video_path: Optional[Path],
+        fps: float,
     ) -> Dict[str, Any]:
         self._flush_bootstrap_buffer(force=True)
         if not self.tracks_per_frame:
             raise RuntimeError("No tracks were produced from the live frame stream")
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        staged_video = pipeline._stage_input_file(video_path, output_dir / video_path.name, copy_inputs=False)
         staged_txt = pipeline._stage_input_file(txt_path, output_dir / txt_path.name, copy_inputs=False)
+        staged_video: Optional[Path] = None
+        if video_path is not None:
+            staged_video = pipeline._stage_input_file(video_path, output_dir / video_path.name, copy_inputs=False)
 
         left_x, left_y, right_x, right_y, norm_constant, video_angle = analysis.process_video_and_extract_data(
             self.tracks_per_frame,
@@ -269,7 +272,8 @@ class LiveTrackingSession:
         after_left = pipeline.detect_limb_anomalies(left_x_fixed, left_y_fixed, side_label="left")
         after_right = pipeline.detect_limb_anomalies(right_x_fixed, right_y_fixed, side_label="right")
 
-        phrase = pipeline.parse_txt_file(str(staged_txt), video_path=str(staged_video))
+        video_arg = str(staged_video) if staged_video is not None else None
+        phrase = pipeline.parse_txt_file(str(staged_txt), fps=float(fps), video_path=video_arg)
         raw_decision = pipeline.referee_decision(
             phrase,
             left_x,
@@ -296,6 +300,7 @@ class LiveTrackingSession:
             right_x=right_x_fixed,
             right_y=right_y_fixed,
             normalisation_constant=norm_constant,
+            fps=float(fps),
             decision_output_path=final_analysis_result_path,
             debug_output_path=None,
             debug_logging=False,
@@ -951,6 +956,7 @@ def _run_one_session(args: argparse.Namespace, start_message: Dict[str, Any]) ->
     total_frames = 0
     txt_path: Optional[Path] = None
     signal_filename: Optional[str] = None
+    session_fps = float(start_message.get("fps") or 30.0)
     while True:
         message = _read_json_line()
         if message is None:
@@ -986,7 +992,6 @@ def _run_one_session(args: argparse.Namespace, start_message: Dict[str, Any]) ->
     if signal_filename is None or txt_path is None:
         raise RuntimeError("Missing signal file payload at session end")
 
-    input_video = pipeline._find_input_video(phrase_dir)
     frame_count_mismatch = False
     expected_last_frame: Optional[int] = None
     if total_frames > 0:
@@ -998,6 +1003,7 @@ def _run_one_session(args: argparse.Namespace, start_message: Dict[str, Any]) ->
 
     live_degraded = overflowed or session.noncontiguous_frames or frame_count_mismatch
     if live_degraded:
+        input_video = pipeline._find_input_video(phrase_dir)
         _log(
             "[LOCAL_ANALYZER] Falling back to offline processing "
             f"(overflowed={overflowed}, noncontiguous={session.noncontiguous_frames}, "
@@ -1031,7 +1037,8 @@ def _run_one_session(args: argparse.Namespace, start_message: Dict[str, Any]) ->
             phrase_dir=phrase_dir,
             output_dir=output_dir,
             txt_path=txt_path,
-            video_path=input_video,
+            video_path=None,
+            fps=session_fps,
         )
         payload = _build_client_payload(job_result, processing_mode="live_streaming")
         payload["capture_total_frames"] = total_frames

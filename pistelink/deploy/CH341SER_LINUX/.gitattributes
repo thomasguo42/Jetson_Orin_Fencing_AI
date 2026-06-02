@@ -1,0 +1,4 @@
+# Vendored kernel-module source: always check out with LF so the tab/EOL-sensitive
+# Makefile and the C source build cleanly on the Jetson regardless of the cloning
+# host's core.autocrlf.
+* text eol=lf

@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
+SCORING_FIGHTS = {8, 9}
+SUPPORTED_HIT_FIGHTS = {3, *SCORING_FIGHTS}
+
+
 @dataclass(frozen=True)
 class FrameTimestamp:
     frame: int
@@ -123,21 +127,25 @@ def build_legacy_txt(
     match_begin_ts: Optional[int],
     voice_end_ts: Optional[int],
     mapping_mode: str = "nearest",
+    active_start_frame: Optional[int] = None,
+    frame_time_fps: Optional[float] = None,
 ) -> Tuple[str, List[SignalFrameMapping]]:
     """Build the TXT consumed by the existing low-latency analyzer."""
 
     first_frame_ts = frames[0].ts if frames else (voice_end_ts or match_begin_ts or _first_signal_ts(signals) or _now_ms())
     active_start_ts = voice_end_ts or match_begin_ts or first_frame_ts
+    use_frame_time = active_start_frame is not None and frame_time_fps is not None and frame_time_fps > 0
     lines: List[str] = []
     mappings: List[SignalFrameMapping] = []
 
     lines.append(f"Phrase {match_id} initialized at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"{_rel(active_start_ts, first_frame_ts):7.3f}s | Phrase recording started")
-    lines.append(f"{_rel(active_start_ts, first_frame_ts):7.3f}s | PisteLink timestamp mapping enabled")
+    start_rel = 0.0 if use_frame_time else _rel(active_start_ts, first_frame_ts)
+    lines.append(f"{start_rel:7.3f}s | Phrase recording started")
+    lines.append(f"{start_rel:7.3f}s | PisteLink timestamp mapping enabled")
 
-    seen_side_hits: Dict[str, int] = {}
+    seen_side_hits: Dict[str, float] = {}
     blade_contact_count = 0
-    first_scoring_ts: Optional[int] = None
+    first_scoring_rel: Optional[float] = None
 
     for signal in signals:
         if signal.get("source") != "hit":
@@ -149,45 +157,70 @@ def build_legacy_txt(
         fight = _int_or_none(signal.get("fight"))
         mapping = _mapping_for_signal(signal, frames, mapping_mode)
         mappings.append(mapping)
-        rel = _rel(signal_ts, first_frame_ts)
+        rel = _rel_for_signal(
+            signal_ts,
+            first_frame_ts,
+            mapping,
+            active_start_frame=active_start_frame,
+            frame_time_fps=frame_time_fps,
+        )
+        if use_frame_time and rel < -1e-6:
+            continue
+        rel = max(0.0, rel)
 
         if fight == 3:
             blade_contact_count += 1
             lines.append(f"{rel:7.3f}s | Off-Target: Blade-to-blade contact.")
-        elif fight in (8, 9):
+        elif fight in SCORING_FIGHTS:
             scoring_side = _fight_to_side(fight, side_map)
             if scoring_side is None:
                 continue
             target_side = "right" if scoring_side == "left" else "left"
-            seen_side_hits[scoring_side] = signal_ts
-            first_scoring_ts = signal_ts if first_scoring_ts is None else min(first_scoring_ts, signal_ts)
+            seen_side_hits[scoring_side] = rel
+            first_scoring_rel = rel if first_scoring_rel is None else min(first_scoring_rel, rel)
             lines.append(
                 f"{rel:7.3f}s | HIT: {scoring_side.title()} scores on {target_side.title()}!"
             )
+        elif fight is not None and fight not in SUPPORTED_HIT_FIGHTS:
+            # Partner-confirmed: the current referee bridge only uses 3, 8, 9.
+            # Keep unsupported hit digits in signal_frame_mapping.json for audit,
+            # but do not let them affect the legacy TXT or scoring decision.
+            continue
 
     terminal_payload = terminal_signal or {}
-    terminal_ts = _int_or_none(terminal_payload.get("signal_ts")) or first_scoring_ts or active_start_ts
+    terminal_ts = _int_or_none(terminal_payload.get("signal_ts")) or active_start_ts
     final_lights = _normalise_final_lights(terminal_payload.get("final_lights"), side_map)
+    terminal_mapping: Optional[SignalFrameMapping] = None
+    terminal_rel = _rel(terminal_ts, first_frame_ts)
 
     if terminal_signal is not None:
-        mappings.append(_mapping_for_signal(terminal_signal, frames, mapping_mode))
+        terminal_mapping = _mapping_for_signal(terminal_signal, frames, mapping_mode)
+        mappings.append(terminal_mapping)
+        terminal_rel = _rel_for_signal(
+            terminal_ts,
+            first_frame_ts,
+            terminal_mapping,
+            active_start_frame=active_start_frame,
+            frame_time_fps=frame_time_fps,
+        )
+    terminal_rel = max(0.0, terminal_rel)
 
     for side in ("left", "right"):
         if final_lights.get(side) and side not in seen_side_hits:
             target_side = "right" if side == "left" else "left"
-            seen_side_hits[side] = terminal_ts
-            first_scoring_ts = terminal_ts if first_scoring_ts is None else min(first_scoring_ts, terminal_ts)
+            seen_side_hits[side] = terminal_rel
+            first_scoring_rel = terminal_rel if first_scoring_rel is None else min(first_scoring_rel, terminal_rel)
             lines.append(
-                f"{_rel(terminal_ts, first_frame_ts):7.3f}s | HIT: {side.title()} scores on {target_side.title()}!"
+                f"{terminal_rel:7.3f}s | HIT: {side.title()} scores on {target_side.title()}!"
             )
 
     if seen_side_hits:
-        lockout_ts = first_scoring_ts or terminal_ts
-        lines.append(f"{_rel(lockout_ts, first_frame_ts):7.3f}s | Lockout period started (0.200s window)")
+        lockout_rel = first_scoring_rel if first_scoring_rel is not None else terminal_rel
+        lines.append(f"{lockout_rel:7.3f}s | Lockout period started (0.200s window)")
 
     if final_lights.get("left") and final_lights.get("right"):
-        simultaneous_ts = max(seen_side_hits.values()) if seen_side_hits else terminal_ts
-        lines.append(f"{_rel(simultaneous_ts, first_frame_ts):7.3f}s | Simultaneous valid hits detected.")
+        simultaneous_rel = max(seen_side_hits.values()) if seen_side_hits else terminal_rel
+        lines.append(f"{simultaneous_rel:7.3f}s | Simultaneous valid hits detected.")
 
     lines.append(
         "Scores -> Fencer 1: {f1}, Fencer 2: {f2}".format(
@@ -195,7 +228,7 @@ def build_legacy_txt(
             f2="HIT" if final_lights.get("left") else "MISS",
         )
     )
-    lines.append(f"{_rel(terminal_ts, first_frame_ts):7.3f}s | Phrase ended")
+    lines.append(f"{terminal_rel:7.3f}s | Phrase ended")
     lines.append(f"Blade contacts: {blade_contact_count}")
     return "\n".join(lines) + "\n", mappings
 
@@ -217,6 +250,24 @@ def _mapping_for_signal(
         delta_ms=base.delta_ms,
         mapping_mode=base.mapping_mode,
     )
+
+
+def _rel_for_signal(
+    signal_ts: int,
+    first_frame_ts: int,
+    mapping: SignalFrameMapping,
+    *,
+    active_start_frame: Optional[int],
+    frame_time_fps: Optional[float],
+) -> float:
+    if (
+        active_start_frame is not None
+        and frame_time_fps is not None
+        and frame_time_fps > 0
+        and mapping.mapped_frame is not None
+    ):
+        return (int(mapping.mapped_frame) - int(active_start_frame)) / float(frame_time_fps)
+    return _rel(signal_ts, first_frame_ts)
 
 
 def _fight_to_side(fight: int, side_map: Dict[str, str]) -> Optional[str]:

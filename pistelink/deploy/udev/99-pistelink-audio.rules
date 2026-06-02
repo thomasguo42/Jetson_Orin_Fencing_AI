@@ -1,0 +1,11 @@
+# Pin the USB sound card to a stable ALSA card name "pistelink" so the audio
+# config never depends on enumeration order. Install to /etc/udev/rules.d/.
+#
+# The appliance speaker is a generic USB dongle that reports 8087:1024 (it borrows
+# Intel's hub ID). SUBSYSTEM=="sound" makes the match unique — it is the only USB
+# sound card on the board. The rule is port-independent: re-plugging into any USB
+# port keeps the card named "pistelink", so `[audio] device = "plughw:CARD=pistelink,DEV=0"`
+# always resolves. If a SECOND identical USB audio dongle is ever attached, add
+# KERNELS=="3610000.usb-2.1" (the USB port path from `cat /proc/asound/cardN/usbid`)
+# to disambiguate by physical port.
+ACTION=="add", SUBSYSTEM=="sound", KERNEL=="card*", ATTRS{idVendor}=="8087", ATTRS{idProduct}=="1024", ATTR{id}="pistelink"

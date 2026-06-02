@@ -1,0 +1,16 @@
+# Build artifacts — `make`/DKMS regenerate these per kernel; only source is tracked
+# (ch341.c, ch341.h, Makefile, README.md). A committed .ko is kernel-specific and
+# useless on any other kernel, so it is deliberately ignored.
+driver/*.ko
+driver/*.o
+driver/*.mod
+driver/*.mod.c
+driver/*.mod.o
+driver/*.a
+driver/*.mk
+driver/.*.cmd
+driver/Module.symvers
+driver/Module.markers
+driver/modules.order
+driver/modules.builtin*
+driver/.tmp_versions/

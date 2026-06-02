@@ -50,7 +50,22 @@ class PisteLinkCameraRecorder:
     def frame_count(self) -> int:
         return int(getattr(self._recorder, "frame_counter", 0) or 0)
 
-    def start(self, output_avi_path: Path, streaming_manager: object) -> bool:
+    def activate_analysis_from_now(self) -> int:
+        """Open the live analyzer gate at the next frame recorded by the camera."""
+
+        lock = getattr(self._recorder, "lock", None)
+        if lock is not None:
+            with lock:
+                start_frame = int(getattr(self._recorder, "frame_counter", 0) or 0)
+                streaming_manager = getattr(self._recorder, "streaming_manager", None)
+        else:
+            start_frame = int(getattr(self._recorder, "frame_counter", 0) or 0)
+            streaming_manager = getattr(self._recorder, "streaming_manager", None)
+        if streaming_manager is not None and hasattr(streaming_manager, "activate_frame_stream"):
+            streaming_manager.activate_frame_stream(start_frame)
+        return start_frame
+
+    def start(self, output_avi_path: Path, streaming_manager: Optional[object]) -> bool:
         output_avi_path.parent.mkdir(parents=True, exist_ok=True)
         self._recorder.start(str(output_avi_path), streaming_manager=streaming_manager)
         return True

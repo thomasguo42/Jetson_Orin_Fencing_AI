@@ -1,0 +1,12 @@
+# PisteLink backend runtime dependencies (versions pinned to the dev env).
+# uvicorn[standard] pulls in websockets (required by the /ws endpoint),
+# uvloop and httptools.
+fastapi==0.135.1
+# Pin starlette explicitly: fastapi only constrains it as >=0.46.0, so a fresh
+# install otherwise pulls starlette 1.x which removed add_event_handler (used in
+# backend/main.py) and crashes at startup with status=1.
+starlette==0.52.1
+uvicorn[standard]==0.41.0
+asyncssh==2.23.0
+pyserial==3.5
+pyserial-asyncio==0.6

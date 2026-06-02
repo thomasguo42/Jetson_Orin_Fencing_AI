@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from local_streaming_manager import LocalStreamingSessionManager
+from local_streaming_manager import LocalStreamingSessionManager, ensure_local_analyzer_service
 
 
 @dataclass(frozen=True)
@@ -22,20 +22,22 @@ class AnalyzerConfig:
     yolo_half: bool = False
     yolo_verbose: bool = False
     bootstrap_frames: int = 8
-    queue_max: int = 120
+    queue_max: int = 720
     jpeg_quality: int = 80
-    startup_timeout: float = 45.0
+    frame_encoding: str = "jpeg"
+    startup_timeout: float = 120.0
     result_timeout: float = 300.0
 
 
 class PisteLinkAnalyzerSession:
-    def __init__(self, config: AnalyzerConfig, match_dir: Path, match_id: str):
+    def __init__(self, config: AnalyzerConfig, match_dir: Path, match_id: str, phrase_dir: Optional[Path] = None):
         self.config = config
         self.match_dir = match_dir
+        self.phrase_dir = phrase_dir or match_dir
         self.match_id = match_id
         self.output_dir = match_dir / "ai" / "live_analysis"
         self.manager = LocalStreamingSessionManager(
-            phrase_dir=match_dir,
+            phrase_dir=self.phrase_dir,
             base_name=match_id,
             bundle_root=config.bundle_root,
             python_executable=config.python_executable,
@@ -49,19 +51,43 @@ class PisteLinkAnalyzerSession:
             bootstrap_frames=config.bootstrap_frames,
             queue_max=config.queue_max,
             jpeg_quality=config.jpeg_quality,
+            frame_encoding=config.frame_encoding,
             startup_timeout=config.startup_timeout,
             result_timeout=config.result_timeout,
         )
 
-    def start(self, fps: float, width: int, height: int, expected_frames: int = 0) -> bool:
+    def start(self, fps: float, width: int, height: int, expected_frames: int = 0, *, start_paused: bool = False) -> bool:
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.phrase_dir.mkdir(parents=True, exist_ok=True)
         return self.manager.start_session(
             session_id=self.match_id,
             fps=fps,
             width=width,
             height=height,
             expected_frames=expected_frames,
+            start_paused=start_paused,
         )
+
+    def begin_streaming(self, fps: float, width: int, height: int, expected_frames: int = 0, *, start_paused: bool = False) -> bool:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.phrase_dir.mkdir(parents=True, exist_ok=True)
+        return self.manager.begin_session(
+            session_id=self.match_id,
+            fps=fps,
+            width=width,
+            height=height,
+            expected_frames=expected_frames,
+            start_paused=start_paused,
+        )
+
+    def wait_until_ready(self, timeout: float, *, fail_on_timeout: bool = False) -> bool:
+        return self.manager.wait_until_ready(timeout=timeout, fail_on_timeout=fail_on_timeout)
+
+    def activate_frame_stream(self, start_frame_number: int) -> None:
+        self.manager.activate_frame_stream(start_frame_number)
+
+    def live_degraded(self, expected_total_frames: int) -> bool:
+        return self.manager.live_degraded(expected_total_frames)
 
     def end(self, signal_data: bytes, signal_filename: str, total_frames: int) -> Optional[Dict[str, Any]]:
         self.manager.end_session(
@@ -73,6 +99,24 @@ class PisteLinkAnalyzerSession:
 
     def cancel(self, reason: str = "") -> None:
         self.manager.cancel_session(reason or "pistelink_cancelled")
+
+
+def warm_pistelink_analyzer(config: AnalyzerConfig, width: int, height: int) -> None:
+    ensure_local_analyzer_service(
+        bundle_root=config.bundle_root,
+        python_executable=config.python_executable,
+        model_path=config.model_path,
+        fisheye_backend=config.fisheye_backend,
+        yolo_conf=config.yolo_conf,
+        yolo_imgsz=config.yolo_imgsz,
+        yolo_half=config.yolo_half,
+        yolo_verbose=config.yolo_verbose,
+        bootstrap_frames=config.bootstrap_frames,
+        startup_timeout=config.startup_timeout,
+        result_timeout=config.result_timeout,
+        width=width,
+        height=height,
+    )
 
 
 def default_analyzer_config() -> AnalyzerConfig:
@@ -94,9 +138,10 @@ def default_analyzer_config() -> AnalyzerConfig:
         yolo_half=_env_bool("PISTELINK_ANALYZER_YOLO_HALF", False),
         yolo_verbose=_env_bool("PISTELINK_ANALYZER_YOLO_VERBOSE", False),
         bootstrap_frames=int(os.environ.get("PISTELINK_ANALYZER_BOOTSTRAP_FRAMES", "8")),
-        queue_max=int(os.environ.get("PISTELINK_ANALYZER_QUEUE_MAX", "120")),
+        queue_max=int(os.environ.get("PISTELINK_ANALYZER_QUEUE_MAX", "720")),
         jpeg_quality=int(os.environ.get("PISTELINK_ANALYZER_JPEG_QUALITY", "80")),
-        startup_timeout=float(os.environ.get("PISTELINK_ANALYZER_STARTUP_TIMEOUT", "45")),
+        frame_encoding=os.environ.get("PISTELINK_ANALYZER_FRAME_ENCODING", "jpeg"),
+        startup_timeout=float(os.environ.get("PISTELINK_ANALYZER_STARTUP_TIMEOUT", "120")),
         result_timeout=float(os.environ.get("PISTELINK_ANALYZER_RESULT_TIMEOUT", "300")),
     )
 

@@ -1,0 +1,28 @@
+# PisteLink backend — Docker Compose (Jetson Orin Nano).
+#   build:  docker compose -f deploy/compose.yml build
+#   run:    docker compose -f deploy/compose.yml up -d
+# TAG selects the image tag (default: latest). Set it in deploy/.env or inline:
+#   TAG=0.1.0 docker compose ... up -d
+services:
+  backend:
+    image: pistelink/backend:${TAG:-latest}
+    build:
+      context: ..                 # repo root
+      dockerfile: deploy/Dockerfile
+      args:
+        # China mirrors by default; override in deploy/.env for intl builds.
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        APT_MIRROR: ${APT_MIRROR:-mirrors.aliyun.com}
+    restart: unless-stopped
+    network_mode: host            # HTTP still binds 127.0.0.1 via [http].host
+    devices:
+      - /dev/ttyUSB-mcu:/dev/ttyUSB-mcu   # CH340, fixed by udev (see udev/)
+      - /dev/snd:/dev/snd                 # audio output
+    volumes:
+      - /var/lib/pistelink:/var/lib/pistelink   # match data (shared with AI)
+      - /run/pistelink:/run/pistelink           # AI UDS (shared with AI)
+      - /etc/pistelink:/etc/pistelink           # config.toml
+    environment:
+      - PISTELINK_CONFIG=/etc/pistelink/config.toml
+    # Container runs as root (see Dockerfile), so no group_add / UID matching.

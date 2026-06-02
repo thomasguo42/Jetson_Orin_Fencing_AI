@@ -32,6 +32,9 @@ AI 服务作为 Unix domain socket server 监听：
 - `PISTELINK_ANALYZER_MODEL_PATH`
 - `PISTELINK_ANALYZER_FISHEYE_BACKEND`
 - `PISTELINK_ANALYZER_RESULT_TIMEOUT`
+- `PISTELINK_DEBUG_ARTIFACTS`：默认 `1`。双灯且非重剑时，AI 已发送 `match_result` 后，在后台生成调试 overlay 和 FPS30 debug log。
+- `PISTELINK_DEBUG_ARTIFACT_TIMEOUT_S`：默认 `600`。
+- `PISTELINK_DEBUG_ARTIFACT_DELAY_S`：默认 `0`。
 
 启动命令：
 
@@ -53,22 +56,24 @@ python3 tools/simulate_pistelink_backend.py --socket-path /tmp/pistelink/ai.sock
 1. 后端发送 `hello`。
 2. AI 回复 `hello_ack`，声明支持 `camera_ready`、帧时间戳、legacy TXT bridge 和 local streaming analyzer。
 3. 后端发送 `match_pre_start`，包含 `match_id`、`weapon`、`sensor`、`side_map`。
-4. AI 创建 match 目录和 `ai/` 子目录，启动本地分析器 session，启动相机录制。
+4. AI 创建 match 目录和 `ai/` 子目录；如果 live streaming 可用，会把本地分析器 session 作为 streaming manager 挂到相机录制器上，但该 session 先处于 paused 状态，再启动相机录制。
 5. AI 回复 `camera_ready`：
    - `video_path` 指向最终 MP4 路径。
    - `recording_start_ts` 为 Unix epoch ms。
    - 如果已收到首帧，附带 `first_frame_ts` 和 `first_frame_index`。
    - `frame_timestamps_path` 指向逐帧时间戳 sidecar。
-6. 后端发送 `match_begin_ack` 和 `voice_end`。
+6. 后端发送 `match_begin_ack` 和 `voice_end`。AI 在收到 `voice_end` 后打开 active analysis gate；此后进入 analyzer 的帧从 active frame `0` 重新编号，口令播放期间的帧不跑 YOLO。
 7. 后端发送非终止 `signal`：
    - `source:"hit"`，`fight:3/8/9`。
    - AI 保存信号，不立即判定。
 8. 后端发送终止 `signal`：
    - `source:"light"`，`terminal:true`，`final_lights`。
    - AI 停止录制，写出帧时间戳、legacy TXT、信号帧映射 JSON。
-   - AI 结束 local streaming analyzer session。
+   - 双灯且非重剑时，AI 结束 live local streaming analyzer session 并读取 ROW 结果。
+   - 单灯、无灯、重剑双灯时，AI 取消 live analyzer session，不等待视觉结果。
    - AI 把 AVI 转成 MP4。
    - AI 回复 `match_result`。
+   - 双灯且非重剑时，AI 在 `match_result` 发出后才启动后台调试产物生成；该步骤不会阻塞返回结果或结果音频触发。
 
 ## 时间对齐实现
 
@@ -94,6 +99,18 @@ python3 tools/simulate_pistelink_backend.py --socket-path /tmp/pistelink/ai.sock
 - `frame`
 - `ts`：Unix epoch ms
 - `mono_ns`：当前 recorder 记录的 perf-counter ns
+
+用于判定的 analyzer TXT 与 archive TXT 分开：
+
+- Archive TXT：`<match_dir>/ai/<match_id>_signals.txt`，保留完整录制时间轴，方便审计。
+- Active analyzer TXT：`<match_dir>/ai/active_analysis_phrase/<match_id>_active_signals.txt`，只用于双灯 ROW 判定；`Phrase recording started` 为 `0.000s`。
+- Active analyzer timestamps：`<match_dir>/ai/active_analysis_phrase/active_frame_timestamps.jsonl`，帧号从 active frame `0` 重新编号。
+
+Active analyzer TXT 的事件时间不是直接使用 wall-clock 秒差，而是：
+
+`(mapped_full_recording_frame - active_start_frame) / analyzer_fps`
+
+这样即使相机实际采集因为负载降到例如 28.6 fps，而保存视频和 analyzer 仍按 30 fps 时间轴运行，hit/terminal 事件也会落在正确的 active analysis frame 上。
 
 ## Legacy TXT 兼容层
 
@@ -123,6 +140,20 @@ python3 tools/simulate_pistelink_backend.py --socket-path /tmp/pistelink/ai.sock
 
 这符合当前管线的核心需求：单灯由电信号最终状态决定，双灯时由视觉 right-of-way 管线决定。
 
+## 双灯调试产物
+
+双灯且非重剑时，默认生成以下调试产物：
+
+- `<match_dir>/ai/debug_artifacts/active_phrase/segment_<match_id>_active.mp4`：裁掉口令播放时间后的原始视频副本，第一帧约等于 `voice_end`。
+- `<match_dir>/ai/debug_artifacts/active_phrase/<match_id>_active_signals.txt`：与 active video 对齐的 TXT，`Phrase recording started` 被重置为 `0.000s`。
+- `<match_dir>/ai/debug_artifacts/keypoints_overlay_active.mp4`：最终 repaired keypoints overlay 的稳定链接。
+- `<match_dir>/ai/debug_artifacts/debug.txt`：`debug_referee_fps30.py` 生成的详细 referee debug log 的稳定链接。
+- `<match_dir>/ai/debug_artifacts/debug_artifacts.json`：本次调试任务状态、路径和裁剪 offset。
+
+实现上，AI 先发送 `match_result`，然后在后台调用复制版 analyzer 的
+`scripts/reprocess_phrase_limb_interp_jumpsafe_experimental.py --write-repaired-overlay --write-fps30-debug-log`。
+因此这些调试文件用于人工复盘，不参与当场判定延迟。
+
 ## 当前保留假设
 
 - 相机仍使用现有 `control_fencing.py` 的相机选择和 GStreamer 配置。
@@ -139,7 +170,11 @@ python3 tools/simulate_pistelink_backend.py --socket-path /tmp/pistelink/ai.sock
 - 复制版 Jetson bundle 已包含原 bundle 的小型 `.venv`；启动脚本会优先使用本目录 `.venv/bin/python`，否则回退到系统 `python3`。
 - Analyzer 目录原本的 `.venv` 是指向共享 1.9 GB 环境的 symlink，本次未复制大环境；实际部署建议通过 `PISTELINK_ANALYZER_PYTHON` 指向已验证的 analyzer Python，或单独给复制版创建 analyzer venv。
 - 本地分析器模型路径默认优先使用复制版 analyzer 目录中的 engine；如果不存在，会回退到 `yolo26s-pose.pt` 或环境变量。
-- 后端如果 8 秒超时，AI 仍会继续处理并发送 late `match_result`，需要后端按 v1.1 中的 backfill 逻辑接收。
+- 后端默认结果超时建议改为 30 秒。当前合作方后端在超时后会把 `json.txt` 回填为 `result_code=0` 并回到 idle，late `match_result` 会被忽略；双灯 ROW 实测若超过 30 秒，需要继续优化 AI 或进一步调大后端超时。
+- Jetson 冷启动加载 TensorRT engine 可能超过 45 秒；AI service 的 `PISTELINK_ANALYZER_STARTUP_TIMEOUT` 默认改为 120 秒。这个预算只覆盖 `camera_ready` 前的 analyzer warmup / session start，不改变触灯后的 30 秒结果等待。
+- PisteLink AI service 默认启用 `PISTELINK_ANALYZER_PREWARM=1` 和 `PISTELINK_LIVE_STREAMING=1`。服务启动后会在后台预热 persistent analyzer；match start 时若 analyzer session 可创建，会先挂载 paused streaming manager，等 `voice_end` 后才把 active frames 送入 live analyzer。`camera_ready.payload.visual_streaming.enabled=true` 和相机日志 `streaming=yes` 是现场确认 streaming manager 已挂载的两个信号。
+- 新版 PisteLink live analyzer 只从 `voice_end` 后开始接收 active frames；日志中 `Active analysis window opened at camera frame N` 表示 pre-audio frames 已停止进入 YOLO。
+- PisteLink live streaming 默认使用 `PISTELINK_ANALYZER_FRAME_ENCODING=jpeg`、`PISTELINK_ANALYZER_JPEG_QUALITY=80` 和 `PISTELINK_ANALYZER_QUEUE_MAX=720`。这样 1280x720/30fps 下较长 phrase 不会因为 raw frame 队列太小而触发 `queue full`，但如果 analyzer 速度低于 30fps，双灯结果仍会等待 live 队列追上。
 
 ## 本轮验证记录
 

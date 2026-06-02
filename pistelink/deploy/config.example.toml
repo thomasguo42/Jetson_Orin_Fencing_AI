@@ -1,0 +1,56 @@
+# PisteLink production config template.
+# Installed to /etc/pistelink/config.toml (0600, owner nvidia) by install.sh.
+# SFTP server params are pre-filled below (client-provided). Public-key auth:
+# the private key lives at /home/nvidia/.ssh/id_ed25519 (the systemd service user,
+# chmod 600); its public key is registered on the server. Rest tunable via Web UI.
+
+[serial]
+device = "/dev/ttyUSB-mcu"   # CH340 fixed symlink (udev rule); dev host uses "COM1"
+baud = 115200
+
+[signal]
+video_sync_offset_ms = 0     # UI-configurable, hot-reloaded (-500..+500)
+
+[ai]
+socket = "/run/pistelink/ai.sock"
+reconnect_min_s = 1
+reconnect_max_s = 30
+heartbeat_s = 2
+heartbeat_timeout_s = 6
+result_timeout_s = 30
+
+[storage]
+root = "/var/lib/pistelink"
+
+[audio]
+# ALSA output device for match sounds. The backend runs as a systemd system
+# service with no PulseAudio session, so "default" lands on HDMI (silent on an
+# appliance with a USB speaker). Set an explicit ALSA device to route directly
+# to the hardware. The 99-pistelink-audio.rules udev rule pins the USB sound card
+# to the stable ALSA name "pistelink", so this resolves regardless of card number
+# or USB port. Use "plughw:0,3" for HDMI instead. Only honored by mpg123.
+# "default" keeps the player's own default (PulseAudio on a dev host).
+device = "plughw:CARD=pistelink,DEV=0"
+
+[upload]
+host = "99.27.206.243"       # client SFTP server
+port = 52182                 # SFTP (SSH) port
+username = "video_upload"
+password = ""                # unused with public-key auth
+private_key = "/home/nvidia/.ssh/id_ed25519"   # SSH private key (nvidia = systemd service user)
+key_passphrase = ""          # set if the private key is encrypted
+base_path = "/incoming"      # remote base dir; match subdirs created under it
+timeout_s = 60
+post_upload_action = "delete_video_only"   # keep_all | delete_video_only | delete_all
+
+[http]
+host = "127.0.0.1"           # loopback only; Kiosk reaches it via localhost.
+port = 8080                  # set 0.0.0.0 only behind an authenticated proxy.
+
+[ui]
+locale = "zh-CN"
+
+[kiosk]
+# Informational only — the backend does not read this. The kiosk is a systemd
+# user service; enable it via `install.sh` with PISTELINK_KIOSK=1 (see deploy/README.md §5).
+enabled = false

@@ -1,0 +1,41 @@
+# Bare-systemd delivery (no Docker). Python 3.11 via Miniforge/conda; on a
+# network-restricted device use domestic mirrors (no VPN). Full walkthrough in
+# deploy/README.md. Prepare once:
+#   # On a networked machine: build the SPA and copy the app to /opt/pistelink
+#   cd frontend && npm ci && npm run build         # -> frontend/dist
+#   # -aR (relative) so frontend/dist lands at /opt/pistelink/frontend/dist,
+#   # matching PISTELINK_FRONTEND_DIR below (plain -a would put it at /opt/pistelink/dist).
+#   rsync -aR backend sound frontend/dist requirements.txt deploy tools \
+#         nvidia@<jetson>:/opt/pistelink/
+#   # On the Jetson: Miniforge (aarch64) from the Tsinghua mirror, then a 3.11 env
+#   bash Miniforge3-Linux-aarch64.sh -b -p /opt/miniforge3
+#   # Use -p (absolute path), not -n: on a root-installed /opt/miniforge3 a non-root
+#   # user can't write envs/ and conda silently builds it under ~/.conda/envs, which
+#   # mismatches ExecStart below and fails with status=203/EXEC.
+#   sudo /opt/miniforge3/bin/conda create -y -p /opt/miniforge3/envs/pistelink python=3.11
+#   sudo /opt/miniforge3/envs/pistelink/bin/pip install -r /opt/pistelink/requirements.txt \
+#         -i https://pypi.tuna.tsinghua.edu.cn/simple
+#   sudo /opt/pistelink/deploy/install.sh           # dirs/udev/tmpfiles/config + mpg123, brltty
+#   sudo cp /opt/pistelink/deploy/systemd/pistelink.service /etc/systemd/system/
+#   sudo systemctl enable --now pistelink.service
+# Adjust ExecStart below if conda is installed elsewhere.
+[Unit]
+Description=PisteLink backend (bare systemd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nvidia
+Group=nvidia
+SupplementaryGroups=dialout audio
+WorkingDirectory=/opt/pistelink
+Environment=PISTELINK_CONFIG=/etc/pistelink/config.toml
+Environment=PISTELINK_FRONTEND_DIR=/opt/pistelink/frontend/dist
+Environment=PISTELINK_SOUND_DIR=/opt/pistelink/sound
+ExecStart=/opt/miniforge3/envs/pistelink/bin/python -m backend.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

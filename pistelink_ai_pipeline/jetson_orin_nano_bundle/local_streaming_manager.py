@@ -9,6 +9,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Deque, Dict, Optional, Set, Tuple
 
+import cv2
 import numpy as np
 
 ECHO_LOCAL_ANALYZER_LOGS = os.environ.get("FENCING_ECHO_LOCAL_ANALYZER_LOGS", "true").lower() in {"1", "true", "yes"}
@@ -133,6 +134,29 @@ class _PersistentLocalAnalyzerClient:
             }
         )
         self._write_bytes(frame_payload)
+
+    def send_encoded_frame(
+        self,
+        payload: bytes,
+        *,
+        frame_number: int,
+        encoding: str,
+        width: int,
+        height: int,
+    ) -> None:
+        if self._process is None or self._process.poll() is not None:
+            raise self._build_error("Local analyzer process exited unexpectedly")
+        self._write_json_line(
+            {
+                "type": "frame",
+                "frame_number": int(frame_number),
+                "encoding": str(encoding),
+                "width": int(width),
+                "height": int(height),
+                "size": int(len(payload)),
+            }
+        )
+        self._write_bytes(payload)
 
     def end_session(
         self,
@@ -501,6 +525,7 @@ class LocalStreamingSessionManager:
         jpeg_quality: int,
         startup_timeout: float,
         result_timeout: float,
+        frame_encoding: str = "raw_bgr24",
     ) -> None:
         self.phrase_dir = phrase_dir
         self.base_name = base_name
@@ -516,6 +541,7 @@ class LocalStreamingSessionManager:
         self.bootstrap_frames = bootstrap_frames
         self.queue_max = queue_max
         self.jpeg_quality = jpeg_quality
+        self.frame_encoding = frame_encoding
         self.startup_timeout = startup_timeout
         self.result_timeout = result_timeout
 
@@ -527,6 +553,11 @@ class LocalStreamingSessionManager:
         self._overflowed = False
         self._ready_event = threading.Event()
         self._ready_ok = False
+        self._frame_gate_lock = threading.Lock()
+        self._stream_paused = False
+        self._frame_origin = 0
+        self._queued_frame_count = 0
+        self._noncontiguous_frame_numbers = False
 
     def start_session(
         self,
@@ -535,6 +566,28 @@ class LocalStreamingSessionManager:
         width: int,
         height: int,
         expected_frames: int = 0,
+        start_paused: bool = False,
+    ) -> bool:
+        if not self.begin_session(
+            session_id=session_id,
+            fps=fps,
+            width=width,
+            height=height,
+            expected_frames=expected_frames,
+            start_paused=start_paused,
+        ):
+            return False
+
+        return self.wait_until_ready(timeout=self.startup_timeout)
+
+    def begin_session(
+        self,
+        session_id: str,
+        fps: float,
+        width: int,
+        height: int,
+        expected_frames: int = 0,
+        start_paused: bool = False,
     ) -> bool:
         if self._active:
             print("[LOCAL_ANALYZER] Session already active")
@@ -547,6 +600,11 @@ class LocalStreamingSessionManager:
         self._overflowed = False
         self._ready_ok = False
         self._ready_event.clear()
+        with self._frame_gate_lock:
+            self._stream_paused = bool(start_paused)
+            self._frame_origin = 0
+            self._queued_frame_count = 0
+            self._noncontiguous_frame_numbers = False
 
         self._thread = threading.Thread(
             target=self._run_session,
@@ -554,10 +612,15 @@ class LocalStreamingSessionManager:
             daemon=True,
         )
         self._thread.start()
+        return True
 
-        if not self._ready_event.wait(timeout=self.startup_timeout):
-            self._error = RuntimeError("Timed out waiting for local analyzer startup")
-            self._active = False
+    def wait_until_ready(self, timeout: float, *, fail_on_timeout: bool = True) -> bool:
+        if not self._active:
+            return False
+        if not self._ready_event.wait(timeout=timeout):
+            if fail_on_timeout:
+                self._error = RuntimeError("Timed out waiting for local analyzer startup")
+                self._active = False
             return False
         if self._error is not None:
             self._active = False
@@ -569,14 +632,56 @@ class LocalStreamingSessionManager:
             return False
         if self._overflowed:
             return False
+        with self._frame_gate_lock:
+            if self._stream_paused:
+                return True
+            analysis_frame_number = int(frame_number) - int(self._frame_origin)
+            if analysis_frame_number < 0:
+                return True
+            if analysis_frame_number != self._queued_frame_count:
+                self._noncontiguous_frame_numbers = True
+            self._queued_frame_count += 1
         try:
-            self._frame_queue.put((frame, frame_number), block=True, timeout=0.05)
+            item = self._prepare_frame_item(frame, analysis_frame_number)
+        except Exception as exc:
+            if not self._overflowed:
+                print(f"[LOCAL_ANALYZER] WARNING: failed to prepare live frame, falling back offline: {exc}")
+            self._overflowed = True
+            return False
+        try:
+            self._frame_queue.put(item, block=True, timeout=0.05)
             return True
         except queue.Full:
             if not self._overflowed:
                 print("[LOCAL_ANALYZER] WARNING: queue full, live analysis will fall back to offline processing")
             self._overflowed = True
             return False
+
+    def _prepare_frame_item(self, frame: Any, frame_number: int) -> Tuple[Any, int, str, int, int]:
+        if not isinstance(frame, np.ndarray):
+            frame = np.asarray(frame)
+        if frame.ndim != 3 or frame.shape[2] != 3:
+            raise ValueError(f"Expected HxWx3 frame, received shape {getattr(frame, 'shape', None)}")
+        if frame.dtype != np.uint8:
+            frame = frame.astype(np.uint8, copy=False)
+
+        encoding = (self.frame_encoding or "raw_bgr24").strip().lower()
+        height, width = int(frame.shape[0]), int(frame.shape[1])
+        if encoding in {"jpeg", "jpg"}:
+            ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, int(self.jpeg_quality)])
+            if not ok:
+                raise RuntimeError("cv2.imencode(.jpg) failed")
+            return encoded.tobytes(), frame_number, "jpeg", width, height
+        if encoding == "png":
+            ok, encoded = cv2.imencode(".png", frame)
+            if not ok:
+                raise RuntimeError("cv2.imencode(.png) failed")
+            return encoded.tobytes(), frame_number, "png", width, height
+        if encoding in {"raw", "raw_bgr24"}:
+            if not frame.flags.c_contiguous:
+                frame = np.ascontiguousarray(frame)
+            return frame, frame_number, "raw_bgr24", width, height
+        raise ValueError(f"Unsupported local analyzer frame encoding '{self.frame_encoding}'")
 
     def end_session(self, signal_data: bytes, signal_filename: str, total_frames: int) -> None:
         if not self._active or self._frame_queue is None:
@@ -599,10 +704,46 @@ class LocalStreamingSessionManager:
     def cancel_session(self, reason: str = "") -> None:
         if not self._active or self._frame_queue is None:
             return
+        self._drop_all_pending_items()
         try:
             self._frame_queue.put(("CANCEL_SESSION", reason or "user_cancelled"), block=False)
         except queue.Full:
             self._overflowed = True
+
+    def activate_frame_stream(self, start_frame_number: int) -> None:
+        with self._frame_gate_lock:
+            self._frame_origin = max(0, int(start_frame_number))
+            self._queued_frame_count = 0
+            self._noncontiguous_frame_numbers = False
+            self._stream_paused = False
+        print(f"[LOCAL_ANALYZER] Active frame stream starts at capture frame {self._frame_origin}", flush=True)
+
+    def frame_origin(self) -> int:
+        with self._frame_gate_lock:
+            return int(self._frame_origin)
+
+    def queued_frame_count(self) -> int:
+        with self._frame_gate_lock:
+            return int(self._queued_frame_count)
+
+    def live_degraded(self, expected_total_frames: int) -> bool:
+        with self._frame_gate_lock:
+            return (
+                bool(self._overflowed)
+                or bool(self._noncontiguous_frame_numbers)
+                or int(self._queued_frame_count) != int(expected_total_frames)
+            )
+
+    def _drop_all_pending_items(self) -> int:
+        if self._frame_queue is None:
+            return 0
+        dropped = 0
+        while True:
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                return dropped
+            dropped += 1
 
     def _drop_pending_frame_items(self) -> int:
         if self._frame_queue is None:
@@ -711,8 +852,17 @@ class LocalStreamingSessionManager:
                             raise RuntimeError(f"Unexpected local analyzer final response: {final_response}")
                         break
 
-                frame, frame_number = item
-                client.send_frame(frame, int(frame_number))
+                frame_payload, frame_number, encoding, width, height = item
+                if encoding == "raw_bgr24":
+                    client.send_frame(frame_payload, int(frame_number))
+                else:
+                    client.send_encoded_frame(
+                        frame_payload,
+                        frame_number=int(frame_number),
+                        encoding=encoding,
+                        width=int(width),
+                        height=int(height),
+                    )
         except Exception as exc:
             if client_session_open and client is not None:
                 try:

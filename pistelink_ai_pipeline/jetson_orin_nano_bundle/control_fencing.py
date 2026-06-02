@@ -2332,8 +2332,15 @@ class CameraRecorder:
         if self.recording or self.writer is not None or self.streaming_manager is not None:
             self.stop()
         self._shutdown_event.set()
+        capture = self.capture
+        self.capture = None
+        if capture is not None:
+            try:
+                capture.release()
+            except Exception:
+                pass
         if self._capture_thread.is_alive():
-            self._capture_thread.join(timeout=1.0)
+            self._capture_thread.join(timeout=2.0)
         try:
             self._analysis_queue.put_nowait(("STOP", None))
         except queue.Full:
@@ -2346,8 +2353,6 @@ class CameraRecorder:
             pass
         if self._writer_thread.is_alive():
             self._writer_thread.join(timeout=1.0)
-        if self.capture and self.capture.isOpened():
-            self.capture.release()
 
 
 def write_signal_line(line: str) -> None:

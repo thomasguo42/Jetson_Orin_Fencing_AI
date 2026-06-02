@@ -1,0 +1,31 @@
+# Optional full-screen Chromium Kiosk pointing at the local UI. This is a
+# systemd USER service (needs a graphical session). The one-click installer sets
+# it up when run with PISTELINK_KIOSK=1:
+#   sudo PISTELINK_KIOSK=1 /opt/pistelink/deploy/install.sh
+# To enable it by hand instead (from a desktop session of the service user):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/pistelink-kiosk.service ~/.config/systemd/user/
+#   systemctl --user enable --now pistelink-kiosk.service
+#   sudo loginctl enable-linger "$USER"   # start without an active login session
+#
+# It shows on the local display only if the desktop AUTO-LOGS IN at boot — a user
+# service has no graphical session until its user logs in. Readiness is gated by
+# the /healthz wait below, so no dependency on the backend system unit is needed
+# (a user unit cannot order against a system unit anyway).
+[Unit]
+Description=PisteLink Kiosk (Chromium full-screen)
+
+[Service]
+Type=simple
+# /snap/bin is on PATH only for interactive login shells, not for systemd units;
+# add it so a snap-packaged chromium (/snap/bin/chromium) is found like an apt one.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+# Wait until the backend answers before opening the browser.
+ExecStartPre=/bin/sh -c 'until curl -fsS http://127.0.0.1:8080/healthz >/dev/null; do sleep 2; done'
+# apt ships chromium-browser, others (incl. snap) ship chromium — pick whichever exists.
+ExecStart=/bin/sh -c 'exec "$(command -v chromium-browser || command -v chromium || echo /snap/bin/chromium)" --kiosk --noerrdialogs --disable-infobars --check-for-update-interval=31536000 --app=http://127.0.0.1:8080'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

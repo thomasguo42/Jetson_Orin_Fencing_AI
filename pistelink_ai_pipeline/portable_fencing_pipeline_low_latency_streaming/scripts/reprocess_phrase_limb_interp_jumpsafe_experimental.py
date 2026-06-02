@@ -352,10 +352,18 @@ def parse_args() -> argparse.Namespace:
 
 def _find_file(folder: Path, pattern: str) -> Path:
     matches = sorted(folder.glob(pattern))
-    if not matches and pattern == "*.txt":
+    if pattern == "*.txt":
+        signal_matches = [
+            p for p in matches
+            if p.name != "json.txt" and not p.name.endswith(".json.txt")
+        ]
+        if signal_matches:
+            return signal_matches[0]
         ai_dir = folder / "ai"
         if ai_dir.exists():
-            matches = sorted(ai_dir.glob(pattern))
+            ai_matches = sorted(ai_dir.glob(pattern))
+            if ai_matches:
+                return ai_matches[0]
     if not matches:
         raise FileNotFoundError(f"No match for {pattern} in {folder}")
     return matches[0]

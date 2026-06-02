@@ -615,10 +615,13 @@ def infer_phrase_fps(
 
 
 def infer_phrase_fps_from_video_path(
-    video_path: Path,
+    video_path: Optional[Path],
     fallback_fps: float = DEFAULT_FPS,
 ) -> float:
     """Infer FPS directly from a known phrase video path."""
+    if video_path is None:
+        _debug(f"[FPS] no phrase video path; fallback fps={fallback_fps:.3f}")
+        return fallback_fps
     try:
         fps = infer_video_fps(str(video_path))
     except Exception as exc:
@@ -664,12 +667,13 @@ def sanitize_for_json(value):
 def run_referee_on_keypoints(
     *,
     txt_path: Path,
-    video_path: Path,
+    video_path: Optional[Path],
     left_x: Dict,
     left_y: Dict,
     right_x: Dict,
     right_y: Dict,
     normalisation_constant: Optional[float] = None,
+    fps: Optional[float] = None,
     decision_output_path: Optional[Path] = None,
     debug_output_path: Optional[Path] = None,
     debug_logging: bool = False,
@@ -678,15 +682,19 @@ def run_referee_on_keypoints(
     global DEBUG_LOGGING
 
     txt_path = Path(txt_path)
-    video_path = Path(video_path)
+    resolved_video_path = Path(video_path) if video_path is not None else None
 
     def _run_core() -> Dict[str, Any]:
-        phrase_fps = infer_phrase_fps_from_video_path(video_path, fallback_fps=DEFAULT_FPS)
-        phrase = parse_txt_file(str(txt_path), fps=phrase_fps, video_path=str(video_path))
+        phrase_fps = float(fps) if fps and fps > 0 else infer_phrase_fps_from_video_path(
+            resolved_video_path,
+            fallback_fps=DEFAULT_FPS,
+        )
+        video_arg = str(resolved_video_path) if resolved_video_path is not None else None
+        phrase = parse_txt_file(str(txt_path), fps=phrase_fps, video_path=video_arg)
         if left_x and KP_FRONT_FOOT in left_x:
             max_frame = len(left_x[KP_FRONT_FOOT]) - 1
             _trim_phrase_to_frames(phrase, max_frame)
-        side_hit_events = extract_side_hit_events(str(txt_path), fps=phrase.fps, video_path=str(video_path))
+        side_hit_events = extract_side_hit_events(str(txt_path), fps=phrase.fps, video_path=video_arg)
         decision = referee_decision(
             phrase,
             left_x,

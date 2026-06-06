@@ -375,14 +375,14 @@ sudo PISTELINK_KIOSK=1 /opt/pistelink/deploy/install.sh
 
 | 宿主路径 | 用途 | 权限 |
 |----------|------|------|
-| `/etc/pistelink/` | 配置 | `0750` nvidia:nvidia（`config.toml` `0600`；SFTP 私钥 `~nvidia/.ssh/id_ed25519` `0600`） |
-| `/var/lib/pistelink/` | 比赛数据（与 AI 共享） | `0750` nvidia:nvidia |
-| `/run/pistelink/` | AI socket 的父目录（socket 由 AI 创建） | `0700` nvidia:nvidia |
+| `/etc/pistelink/` | 配置 | `0750` root:pistelink（`config.toml` `0640`；SFTP 私钥 `/etc/pistelink/ssh/upload_ed25519` 限服务用户读取） |
+| `/var/lib/pistelink/` | 比赛数据（与 AI 共享） | `0750` root:pistelink |
+| `/run/pistelink/` | AI socket 的父目录（socket 由 AI 创建） | `0770` root:pistelink |
 | `/dev/ttyUSB-mcu` | 串口 | `0660` dialout 组 |
 | `/dev/snd/*` | 音频 | `0660` audio 组 |
 
-后端以 `nvidia` 运行（service 里 `SupplementaryGroups=dialout audio`），据此能访问串口、
-音频，以及 AI 创建的 `0600 nvidia` socket。
+后端以 `pistelink-backend` 运行，AI 以 `pistelink-ai` 运行；两者通过共享的 `pistelink`
+服务组访问 `/run/pistelink` 和 AI socket。
 
 ---
 
@@ -395,10 +395,10 @@ sudo PISTELINK_KIOSK=1 /opt/pistelink/deploy/install.sh
     （`ss -ltnp | grep 8080` 会显示 `LISTEN <那个IP>:8080`，回环不在内）。要本机 + 远程都能
     访问就用 `0.0.0.0`（监听所有网卡）；只想走某条链路又想保留本机访问，靠防火墙放行
     `lo` + 目标网卡、拒掉其它,而不是把 `host` 写死成单个 IP。
-- 上传走 **SFTP（SSH，传输加密）**，公钥认证；私钥 `~nvidia/.ssh/id_ed25519` 必须 `0600`、
-  仅 nvidia 可读。
-- 当前**不校验服务器主机密钥**（`known_hosts=None`，信任你已配置的服务器）；如需更严，
-  可改为校验 `known_hosts`。
+- 上传走 **SFTP（SSH，传输加密）**，公钥认证；私钥建议放在
+  `/etc/pistelink/ssh/upload_ed25519`，仅服务用户可读。
+- 必须配置服务器主机密钥钉扎：`[upload].known_hosts` 指向 OpenSSH known_hosts 文件。
+  非 22 端口使用 `[host]:port ssh-ed25519 ...` 语法。
 
 ---
 

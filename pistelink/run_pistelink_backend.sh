@@ -285,6 +285,7 @@ username = ""
 password = ""
 private_key = ""
 key_passphrase = ""
+known_hosts = ""
 base_path = "/"
 timeout_s = 60
 post_upload_action = "delete_video_only"

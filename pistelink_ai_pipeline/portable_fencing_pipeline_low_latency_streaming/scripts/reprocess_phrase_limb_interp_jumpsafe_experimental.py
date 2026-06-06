@@ -20,6 +20,7 @@ import argparse
 import importlib
 import json
 import math
+import os
 import re
 import shutil
 import site
@@ -33,11 +34,13 @@ import pandas as pd
 
 import sys
 
+SCRIPTS_DIR = Path(__file__).resolve().parent
 BUNDLE_ROOT = Path(__file__).resolve().parent.parent
 TENSORRT_PYTHON_PATH = Path("/usr/lib/python3.10/dist-packages")
 if TENSORRT_PYTHON_PATH.exists():
     site.addsitedir(str(TENSORRT_PYTHON_PATH))
 sys.path.append(str(BUNDLE_ROOT))
+sys.path.append(str(SCRIPTS_DIR))
 VPI_PYTHON_PATH = Path("/opt/nvidia/vpi3/lib/aarch64-linux-gnu/python")
 if VPI_PYTHON_PATH.exists():
     sys.path.append(str(VPI_PYTHON_PATH))
@@ -105,7 +108,46 @@ def _load_vpi() -> Any:
     return vpi
 FISHEYE_BACKENDS = ("none", "vpi-cuda", "vpi-vic", "opencv")
 VIDEO_READERS = ("opencv", "gstreamer-mjpeg")
-DEFAULT_MODEL_PATH = BUNDLE_ROOT / "engine_models" / "yolo26l-pose_fast_fp16_ultra.engine"
+DEFAULT_ENGINE_NAME = "yolo26l-pose_fast_fp16_ultra.engine"
+
+
+def _default_pose_model_path() -> Path:
+    env_value = os.environ.get("PISTELINK_ANALYZER_MODEL_PATH", "").strip()
+    if env_value:
+        return _resolve_pose_model_path(Path(env_value).expanduser())
+
+    candidates = [
+        BUNDLE_ROOT.parent / "models" / DEFAULT_ENGINE_NAME,
+        BUNDLE_ROOT / "engine_models" / DEFAULT_ENGINE_NAME,
+        BUNDLE_ROOT
+        / "experiments"
+        / "yolov8_pose"
+        / "matrix_all_20260404"
+        / "yolo26l-pose"
+        / DEFAULT_ENGINE_NAME,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _resolve_pose_model_path(path: Path) -> Path:
+    if not path.is_dir():
+        return path
+
+    candidates = [
+        path / DEFAULT_ENGINE_NAME,
+        path / "matrix_all_20260404" / "yolo26l-pose" / DEFAULT_ENGINE_NAME,
+    ]
+    candidates.extend(sorted(path.rglob(DEFAULT_ENGINE_NAME)))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return path
+
+
+DEFAULT_MODEL_PATH = _default_pose_model_path()
 
 JOINT_BONES = {
     7: [(5, 7, "left_upper_arm"), (7, 9, "left_lower_arm")],
@@ -1033,6 +1075,16 @@ def _bootstrap_candidate_from_detection(
     if box_w < 20.0 or box_h < 60.0:
         return None
 
+    edge_margin_x = max(1.0, width * 0.03)
+    edge_margin_y = max(1.0, height * 0.05)
+    if (
+        x1 <= edge_margin_x
+        or x2 >= width - edge_margin_x
+        or y1 <= edge_margin_y
+        or y2 >= height - edge_margin_y
+    ):
+        return None
+
     center_x = 0.5 * (x1 + x2)
     center_y = 0.5 * (y1 + y2)
     bottom_y = y2
@@ -1050,16 +1102,8 @@ def _bootstrap_candidate_from_detection(
     frame_area = max(float(width * height), 1.0)
     area_score = min(1.0, ((box_w * box_h) / (frame_area * 0.10)))
 
-    edge_margin = width * 0.03
-    top_margin = height * 0.05
     center_deadzone = width * 0.04
     edge_penalty = 0.0
-    if x1 < edge_margin:
-        edge_penalty += (edge_margin - x1) / max(edge_margin, 1.0)
-    if x2 > width - edge_margin:
-        edge_penalty += (x2 - (width - edge_margin)) / max(edge_margin, 1.0)
-    if y1 < top_margin:
-        edge_penalty += (top_margin - y1) / max(top_margin, 1.0)
 
     center_penalty = 0.0
     hcenter = width / 2.0

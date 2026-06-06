@@ -17,11 +17,11 @@ PisteLink backend remains a separate service and owns MCU serial, audio,
 
 ## Install Service
 
-Review `systemd/pistelink-ai.service` before installing. If the device uses the
-partner default `nvidia` user, change `User`, `Group`, and paths accordingly.
+Review `systemd/pistelink-ai.service` before installing. The product unit
+expects `/opt/pistelink` and the shared `pistelink` service group.
 
 ```bash
-sudo cp /home/thomas/fencing/pistelink_ai_pipeline/deploy/systemd/pistelink-ai.service /etc/systemd/system/
+sudo cp /opt/pistelink/deploy/systemd/pistelink-ai.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now pistelink-ai.service
 ```

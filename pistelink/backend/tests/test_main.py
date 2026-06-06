@@ -277,6 +277,62 @@ def test_round_end_tie_temp_result(env):
     asyncio.run(scenario())
 
 
+def test_ai_result_queues_reason_audio_after_winner(env):
+    async def scenario():
+        await main.on_main_frame(0x50, {"data": bytes([1, 0])}, 1000, 1)
+        await main.on_ai_event("camera_ready", {}, "")
+        await main.on_main_frame(0x52, {"data": bytes([0x00, 0x00])}, 2000, 2)
+        await asyncio.sleep(0)
+        mid = main.match.match_id
+
+        await main.on_ai_event(
+            "match_result",
+            {"winner": "A", "result_code": 8,
+             "reason_code": "opponent_pause",
+             "reason_audio_key": "reason_opponent_pause_left",
+             "spoken_reason_zh": "左方得分。对方停顿，左方保有进攻权。",
+             "video_path": f"{env['root']}/matches/{mid}/segment.mp4"},
+            mid)
+
+        assert env["audio"].played[-1] == "left.mp3"
+        assert main.match.result_audio_queue == ["zh/reason_opponent_pause_left.mp3"]
+        await main.on_audio_done("left.mp3")
+        assert env["audio"].played[-1] == "zh/reason_opponent_pause_left.mp3"
+        assert main.match.state == MatchState.SETTLING
+        await main.on_audio_done("zh/reason_opponent_pause_left.mp3")
+        assert main.match.state == MatchState.IDLE
+    asyncio.run(scenario())
+
+
+def test_single_light_reason_audio_can_arrive_after_winner_done(env):
+    async def scenario():
+        await main.on_main_frame(0x50, {"data": bytes([1, 0])}, 1000, 1)
+        await main.on_ai_event("camera_ready", {}, "")
+        await main.on_main_frame(0x52, {"data": bytes([0x00, 0x03])}, 2000, 2)
+        await asyncio.sleep(0)
+        mid = main.match.match_id
+        assert env["audio"].played[-1] == "left.mp3"
+
+        await main.on_audio_done("left.mp3")
+        assert main.match.state == MatchState.SETTLING
+        assert main.match.result_audio_done is True
+
+        await main.on_ai_event(
+            "match_result",
+            {"winner": "A", "result_code": 8,
+             "reason_code": "single_light",
+             "reason_audio_key": "reason_single_light_left",
+             "spoken_reason_zh": "左方得分。单灯有效。",
+             "video_path": f"{env['root']}/matches/{mid}/segment.mp4"},
+            mid)
+
+        assert env["audio"].played[-1] == "zh/reason_single_light_left.mp3"
+        assert main.match.state == MatchState.SETTLING
+        await main.on_audio_done("zh/reason_single_light_left.mp3")
+        assert main.match.state == MatchState.IDLE
+    asyncio.run(scenario())
+
+
 # ── AI timeout: result_code=0 + light-derived winner audio ─────────────────
 
 def test_ai_timeout_finalizes_zero_and_announces_lights(env):

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -36,6 +37,7 @@ uploader: Uploader | None = None
 _settle_timeout_task: asyncio.Task | None = None
 _timed_out_matches: dict[str, tuple[CurrentMatch, int]] = {}
 _MAX_TIMED_OUT_BACKFILLS = 16
+_REASON_AUDIO_KEY_RE = re.compile(r"^[a-z0-9_]+$")
 
 
 def _cancel_settle_timeout():
@@ -60,6 +62,8 @@ def _snapshot_match(src: CurrentMatch) -> CurrentMatch:
     ]
     snap.result_audio_announced = src.result_audio_announced
     snap.result_audio_done = src.result_audio_done
+    snap.result_audio_current = src.result_audio_current
+    snap.result_audio_queue = list(src.result_audio_queue)
     snap.ai_result_received = src.ai_result_received
     return snap
 
@@ -293,14 +297,60 @@ def _on_round_end(data: bytes, recv_ts: int, recv_mono_ns: int):
     if temp_result in (8, 9) and audio:
         sound = _winner_audio(temp_result)
         if sound:
-            match.result_audio_announced = True
-            match.result_audio_done = False
-            audio.play(sound)
+            _start_result_audio_sequence([sound])
 
 
 def _winner_audio(result_code: int) -> str | None:
     """Winner-announcement sound for a result code (8=A, 9=B, 10=tie)."""
     return {8: "left.mp3", 9: "right.mp3", 10: "tie.mp3"}.get(result_code)
+
+
+def _reason_audio(payload: dict) -> str | None:
+    key = str(payload.get("reason_audio_key") or "").strip()
+    if not key:
+        return None
+    if not _REASON_AUDIO_KEY_RE.fullmatch(key):
+        add_log("warning", f"Ignoring invalid reason_audio_key: {key!r}")
+        return None
+    return f"zh/{key}.mp3"
+
+
+def _start_result_audio_sequence(files: list[str]) -> bool:
+    if not audio or not files:
+        return False
+    first, *rest = files
+    match.result_audio_announced = True
+    match.result_audio_done = False
+    match.result_audio_current = first
+    match.result_audio_queue = list(rest)
+    audio.play(first)
+    return True
+
+
+def _append_result_audio(filename: str | None) -> bool:
+    if not audio or not filename:
+        return False
+    if filename == match.result_audio_current or filename in match.result_audio_queue:
+        return False
+    if match.result_audio_done and not match.result_audio_current:
+        match.result_audio_done = False
+        match.result_audio_current = filename
+        audio.play(filename)
+        return True
+    match.result_audio_queue.append(filename)
+    return True
+
+
+def _finish_or_continue_result_audio() -> bool:
+    if match.result_audio_queue and audio:
+        next_file = match.result_audio_queue.pop(0)
+        match.result_audio_current = next_file
+        match.result_audio_done = False
+        audio.play(next_file)
+        return True
+    match.result_audio_current = ""
+    match.result_audio_done = True
+    return False
 
 
 def _finalize_current_match_after_audio():
@@ -422,6 +472,9 @@ async def on_ai_event(event_type: str, payload: dict, _match_id: str):
         match.ai_result_received = True
         winner = payload.get("winner", "tie")
         result_code = _result_code(payload)
+        reason_code = payload.get("reason_code")
+        spoken_reason_zh = payload.get("spoken_reason_zh")
+        reason_sound = _reason_audio(payload)
         corrected = _apply_corrected_signals(match, payload)
 
         # 回填: rewrite json.txt with the authoritative AI result code.
@@ -429,23 +482,32 @@ async def on_ai_event(event_type: str, payload: dict, _match_id: str):
         write_json_txt(match, result_code, config.video_sync_offset_ms)
         _validate_match_result_video_path(match.match_id, payload)
 
+        reason_log = f" reason_code={reason_code}" if reason_code else ""
         add_log("info",
                 f"Match result: winner={winner} result_code={result_code} "
-                f"corrected_signals={corrected}")
-        ws_push_sync({
+                f"corrected_signals={corrected}{reason_log}")
+        state_event = {
             "type": "match_state", "state": match.state.value,
             "match_id": match.match_id, "winner": winner,
-        })
+        }
+        if reason_code:
+            state_event["reason_code"] = reason_code
+        if spoken_reason_zh:
+            state_event["spoken_reason_zh"] = spoken_reason_zh
+        ws_push_sync(state_event)
         audio_map = {"A": "left.mp3", "B": "right.mp3", "tie": "tie.mp3"}
         if audio:
             if match.result_audio_announced:
+                if _append_result_audio(reason_sound):
+                    add_log("info", f"Queued result reason audio: {reason_sound}")
                 add_log("info", "Result audio already announced from final lights")
                 if match.result_audio_done:
                     _finalize_current_match_after_audio()
             else:
-                match.result_audio_announced = True
-                match.result_audio_done = False
-                audio.play(audio_map.get(winner, "tie.mp3"))
+                files = [audio_map.get(winner, "tie.mp3")]
+                if reason_sound:
+                    files.append(reason_sound)
+                _start_result_audio_sequence(files)
 
     elif event_type == "ai_error":
         add_log("error", f"AI error: {payload.get('code', '?')} - {payload.get('reason', '')}")
@@ -463,13 +525,14 @@ async def on_audio_done(filename: str):
             await ai_client.send("voice_end",
                 {"voice_end_ts": match.voice_end_ts}, match_id=match.match_id)
 
-    elif filename in ("left.mp3", "right.mp3", "tie.mp3"):
+    elif filename == match.result_audio_current:
         if match.state != MatchState.SETTLING:
             return  # stale callback (match canceled / already finalized)
-        match.result_audio_done = True
+        if _finish_or_continue_result_audio():
+            return
         if match.ai_result_received:
             # json.txt was already written (and backfilled) when match_result
-            # arrived; the winner audio has now finished, so just finalize state.
+            # arrived; the full result-audio sequence is done, so finalize state.
             _finalize_current_match_after_audio()
 
 

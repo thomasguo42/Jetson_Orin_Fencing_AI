@@ -50,6 +50,7 @@ build.ninja
 logs/
 runtime_inputs/
 runtime_outputs/
+pistelink_runtime/
 recordings/
 20*_phrase*/
 20*_phrase*.avi

@@ -32,6 +32,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "password": "",
         "private_key": "",      # path to SSH private key (public-key auth); takes precedence over password
         "key_passphrase": "",   # passphrase for the private key, if any
+        "known_hosts": "",
         "base_path": "/",
         "timeout_s": 60,
         "post_upload_action": "delete_video_only",

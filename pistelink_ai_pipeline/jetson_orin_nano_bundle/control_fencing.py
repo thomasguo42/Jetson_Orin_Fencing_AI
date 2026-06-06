@@ -70,7 +70,6 @@ except ValueError:
 RECORDINGS_DIR = Path(os.environ.get("FENCING_RECORDINGS_DIR", "recordings")).expanduser()
 if not RECORDINGS_DIR.is_absolute():
     RECORDINGS_DIR = (Path(__file__).resolve().parent / RECORDINGS_DIR).resolve()
-RECORDINGS_DIR.mkdir(exist_ok=True)
 
 try:
     CAMERA_INDEX = int(os.environ.get("FENCING_CAMERA_INDEX", "0"))
@@ -128,10 +127,13 @@ except ValueError:
 REFEREE_STREAMING_SAVE_LOCAL = os.environ.get("REFEREE_STREAMING_SAVE_LOCAL", "true").lower() in {"1", "true", "yes"}
 
 REFEREE_USE_LOCAL_STREAMING_ANALYZER = os.environ.get("REFEREE_USE_LOCAL_STREAMING_ANALYZER", "false").lower() in {"1", "true", "yes"}
+_DEFAULT_LOCAL_ANALYZER_ROOT = (
+    Path(__file__).resolve().parent.parent / "portable_fencing_pipeline_low_latency_streaming"
+)
 REFEREE_LOCAL_ANALYZER_ROOT = Path(
     os.environ.get(
         "REFEREE_LOCAL_ANALYZER_ROOT",
-        "/home/thomas/fencing/portable_fencing_pipeline_low_latency_streaming",
+        str(_DEFAULT_LOCAL_ANALYZER_ROOT),
     )
 ).resolve()
 _local_analyzer_python = Path(
@@ -2490,6 +2492,7 @@ def prepare_phrase_artifacts(phrase_number: int) -> None:
 
     timestamp = time.strftime('%Y%m%d_%H%M%S')
     base_name = f"{timestamp}_phrase{phrase_number:02d}"
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
     phrase_dir = (RECORDINGS_DIR / base_name).resolve()
     phrase_dir.mkdir(parents=True, exist_ok=True)
 

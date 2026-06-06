@@ -111,9 +111,15 @@ class FakeConn:
 def up_env(tmp_path, monkeypatch):
     cfg = Config(str(tmp_path / "none.toml"))      # missing file → DEFAULTS
     cfg._data["storage"]["root"] = str(tmp_path)
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text(
+        "1.2.3.4 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeTestKey\n",
+        encoding="utf-8",
+    )
     cfg._data["upload"].update({
         "host": "1.2.3.4", "port": 22, "username": "u", "password": "p",
-        "base_path": "/upload", "post_upload_action": "keep_all",
+        "known_hosts": str(known_hosts), "base_path": "/upload",
+        "post_upload_action": "keep_all",
     })
     monkeypatch.setattr(config_mod, "_config", cfg)
 
@@ -325,32 +331,64 @@ def test_skip_when_json_missing(up_env):
 
 # ── auth kwargs (public-key vs password) ──────────────────────────────────
 
-def test_connect_kwargs_uses_private_key_when_set():
+def _known_hosts_file(tmp_path):
+    path = tmp_path / "known_hosts"
+    path.write_text(
+        "upload.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeTestKey\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_connect_kwargs_uses_private_key_when_set(tmp_path):
+    known_hosts = _known_hosts_file(tmp_path)
     kw = uploader._connect_kwargs({
         "port": 52182, "username": "video_upload",
         "private_key": "/etc/pistelink/id_upload", "key_passphrase": "secret",
         "password": "ignored",
+        "known_hosts": str(known_hosts),
     })
     assert kw["client_keys"] == ["/etc/pistelink/id_upload"]
     assert kw["passphrase"] == "secret"
-    assert kw["known_hosts"] is None
+    assert kw["known_hosts"] == str(known_hosts)
     assert "password" not in kw          # key auth wins; password not sent
 
 
-def test_connect_kwargs_falls_back_to_password():
+def test_connect_kwargs_falls_back_to_password(tmp_path):
+    known_hosts = _known_hosts_file(tmp_path)
     kw = uploader._connect_kwargs({
         "username": "u", "password": "p", "private_key": "",
+        "known_hosts": str(known_hosts),
     })
     assert kw["password"] == "p"
+    assert kw["known_hosts"] == str(known_hosts)
     assert "client_keys" not in kw
 
 
-def test_connect_kwargs_no_passphrase_omitted():
+def test_connect_kwargs_no_passphrase_omitted(tmp_path):
+    known_hosts = _known_hosts_file(tmp_path)
     kw = uploader._connect_kwargs({
         "private_key": "/k", "key_passphrase": "",
+        "known_hosts": str(known_hosts),
     })
     assert kw["client_keys"] == ["/k"]
     assert "passphrase" not in kw
+
+
+def test_connect_kwargs_requires_known_hosts():
+    with pytest.raises(ValueError, match="known_hosts"):
+        uploader._connect_kwargs({
+            "username": "u", "password": "p", "private_key": "",
+        })
+
+
+def test_connect_kwargs_requires_existing_known_hosts(tmp_path):
+    missing = tmp_path / "missing_known_hosts"
+    with pytest.raises(FileNotFoundError, match="known_hosts"):
+        uploader._connect_kwargs({
+            "username": "u", "password": "p", "private_key": "",
+            "known_hosts": str(missing),
+        })
 
 
 # ── test_connection (FR-6.4) ──────────────────────────────────────────────

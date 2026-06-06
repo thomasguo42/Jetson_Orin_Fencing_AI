@@ -43,6 +43,8 @@ class CurrentMatch:
     signals: list[Signal] = field(default_factory=list)
     result_audio_announced: bool = False
     result_audio_done: bool = False
+    result_audio_current: str = ""
+    result_audio_queue: list[str] = field(default_factory=list)
     ai_result_received: bool = False
 
     def reset(self):
@@ -55,4 +57,6 @@ class CurrentMatch:
         self.signals.clear()
         self.result_audio_announced = False
         self.result_audio_done = False
+        self.result_audio_current = ""
+        self.result_audio_queue.clear()
         self.ai_result_received = False

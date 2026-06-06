@@ -1,9 +1,4 @@
-# PisteLink backend service for this Jetson workspace.
-# Host setup:
-#   sudo /home/thomas/fencing/pistelink/deploy/install.sh
-#   sudo cp /home/thomas/fencing/pistelink/deploy/systemd/pistelink.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now pistelink.service
+# PisteLink backend service for the product install root.
 [Unit]
 Description=PisteLink backend (bare systemd)
 After=network-online.target
@@ -11,19 +6,28 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=thomas
-Group=thomas
+User=pistelink-backend
+Group=pistelink
 SupplementaryGroups=dialout audio video render
-WorkingDirectory=/home/thomas/fencing/pistelink
+WorkingDirectory=/opt/pistelink
 Environment=PISTELINK_CONFIG=/etc/pistelink/config.toml
 Environment=PISTELINK_RUNTIME_DIR=/run/pistelink
-Environment=PISTELINK_FRONTEND_DIR=/home/thomas/fencing/pistelink/frontend/dist
-Environment=PISTELINK_SOUND_DIR=/home/thomas/fencing/pistelink/sound
+Environment=PISTELINK_FRONTEND_DIR=/opt/pistelink/frontend/dist
+Environment=PISTELINK_SOUND_DIR=/opt/pistelink/sound
 RuntimeDirectory=pistelink
 RuntimeDirectoryMode=0770
 RuntimeDirectoryPreserve=yes
 UMask=0007
-ExecStart=/home/thomas/fencing/pistelink/run_pistelink_backend.sh
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=false
+ReadWritePaths=/var/lib/pistelink /run/pistelink
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=false
+ExecStart=/opt/pistelink/run_pistelink_backend.sh
 Restart=always
 RestartSec=2
 

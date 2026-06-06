@@ -120,9 +120,11 @@ def warm_pistelink_analyzer(config: AnalyzerConfig, width: int, height: int) -> 
 
 
 def default_analyzer_config() -> AnalyzerConfig:
-    bundle_dir = Path(__file__).resolve().parent
-    project_root = bundle_dir.parent
-    default_bundle_root = project_root / "portable_fencing_pipeline_low_latency_streaming"
+    service_dir = Path(__file__).resolve().parent
+    ai_root = service_dir.parent
+    dev_bundle_root = ai_root / "portable_fencing_pipeline_low_latency_streaming"
+    product_bundle_root = ai_root / "analyzer"
+    default_bundle_root = product_bundle_root if product_bundle_root.exists() else dev_bundle_root
     bundle_root = Path(os.environ.get("PISTELINK_ANALYZER_ROOT", default_bundle_root)).expanduser()
 
     python_executable = _default_python_executable(bundle_root)
@@ -153,7 +155,6 @@ def _default_python_executable(bundle_root: Path) -> Path:
 
     candidates = [
         bundle_root / ".venv" / "bin" / "python",
-        Path("/home/thomas/fencing/portable_fencing_pipeline_low_latency_streaming/.venv/bin/python"),
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -164,21 +165,41 @@ def _default_python_executable(bundle_root: Path) -> Path:
 def _default_model_path(bundle_root: Path) -> Optional[Path]:
     env_value = os.environ.get("PISTELINK_ANALYZER_MODEL_PATH")
     if env_value:
-        return Path(env_value).expanduser()
+        return _resolve_pose_model_path(Path(env_value).expanduser())
 
+    engine_name = "yolo26l-pose_fast_fp16_ultra.engine"
     candidates = [
+        bundle_root.parent / "models" / engine_name,
+        bundle_root / "engine_models" / engine_name,
         bundle_root
         / "experiments"
         / "yolov8_pose"
         / "matrix_all_20260404"
         / "yolo26l-pose"
-        / "yolo26l-pose_fast_fp16_ultra.engine",
-        bundle_root / "yolo26s-pose.pt",
+        / engine_name,
     ]
+    if _env_bool("PISTELINK_ALLOW_DEBUG_MODEL_FALLBACKS", False):
+        candidates.append(bundle_root / "yolo26s-pose.pt")
     for candidate in candidates:
         if candidate.exists():
             return candidate
     return None
+
+
+def _resolve_pose_model_path(path: Path) -> Path:
+    engine_name = "yolo26l-pose_fast_fp16_ultra.engine"
+    if not path.is_dir():
+        return path
+
+    candidates = [
+        path / engine_name,
+        path / "matrix_all_20260404" / "yolo26l-pose" / engine_name,
+    ]
+    candidates.extend(sorted(path.rglob(engine_name)))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return path
 
 
 def _env_bool(name: str, default: bool) -> bool:

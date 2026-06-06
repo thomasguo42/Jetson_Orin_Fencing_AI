@@ -74,7 +74,19 @@ choose_camera_device() {
 export PISTELINK_RUNTIME_DIR="$(choose_runtime_dir)"
 export PISTELINK_AI_SOCKET="${PISTELINK_AI_SOCKET:-${PISTELINK_RUNTIME_DIR}/ai.sock}"
 export PISTELINK_MATCH_ROOT="$(choose_match_root)"
-export PISTELINK_ANALYZER_ROOT="${PISTELINK_ANALYZER_ROOT:-${SCRIPT_DIR}/../portable_fencing_pipeline_low_latency_streaming}"
+if [[ -z "${PISTELINK_ANALYZER_ROOT:-}" ]]; then
+  if [[ -d "${SCRIPT_DIR}/../analyzer" ]]; then
+    export PISTELINK_ANALYZER_ROOT="${SCRIPT_DIR}/../analyzer"
+  else
+    export PISTELINK_ANALYZER_ROOT="${SCRIPT_DIR}/../portable_fencing_pipeline_low_latency_streaming"
+  fi
+fi
+if [[ -z "${PISTELINK_ANALYZER_MODEL_PATH:-}" && -f "${SCRIPT_DIR}/../models/yolo26l-pose_fast_fp16_ultra.engine" ]]; then
+  export PISTELINK_ANALYZER_MODEL_PATH="${SCRIPT_DIR}/../models/yolo26l-pose_fast_fp16_ultra.engine"
+fi
+if [[ -z "${PISTELINK_BLADE_MODEL_PATH:-}" && -f "${SCRIPT_DIR}/../models/blade_touch_referee_model.joblib" ]]; then
+  export PISTELINK_BLADE_MODEL_PATH="${SCRIPT_DIR}/../models/blade_touch_referee_model.joblib"
+fi
 export PISTELINK_ANALYZER_FISHEYE_BACKEND="${PISTELINK_ANALYZER_FISHEYE_BACKEND:-none}"
 export PYTHONNOUSERSITE="${PYTHONNOUSERSITE:-1}"
 

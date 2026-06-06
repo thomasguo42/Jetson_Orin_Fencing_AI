@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pistelink_analysis_adapter import PisteLinkAnalyzerSession, default_analyzer_config, warm_pistelink_analyzer
 from pistelink_camera_recorder import PisteLinkCameraRecorder, default_camera_settings, transcode_avi_to_mp4
+from local_streaming_manager import shutdown_shared_local_analyzer
 from pistelink_protocol import NdjsonSocket, ProtocolError, epoch_ms, make_message
 from pistelink_signal_adapter import (
     FrameTimestamp,
@@ -827,6 +828,13 @@ class PisteLinkAIService:
         payload["frame_timestamps_path"] = str(ctx.frame_timestamps_path)
         payload["signal_txt_path"] = str(ctx.signal_txt_path)
         payload["decision_source"] = decision_source
+        payload.update(_build_reason_metadata(
+            ctx=ctx,
+            winner=winner,
+            decision_source=decision_source,
+            analysis_result=analysis_result,
+            processing_error=processing_error,
+        ))
         if analysis_result is not None:
             payload["analysis_winner"] = analysis_result.get("winner")
             if analysis_result.get("reason"):
@@ -922,6 +930,7 @@ class PisteLinkAIService:
                 offset_s=offset_s,
                 timeout_s=max(30.0, self.debug_artifact_timeout_s),
             )
+            shutdown_shared_local_analyzer()
             stdout, stderr = self._run_debug_reprocess(phrase_dir=phrase_dir, output_dir=output_dir)
             debug_log.write_text(
                 "STDOUT\n"
@@ -1253,6 +1262,159 @@ def _result_code_for_ab(side: str) -> int:
     if side == "B":
         return 9
     return 0
+
+
+_SIDE_ZH = {
+    "left": "左方",
+    "right": "右方",
+}
+
+_SIDE_REASON_ZH = {
+    "single_light": "{side}得分。单灯有效。",
+    "opponent_pause": "{side}得分。对方停顿，{side}保有进攻权。",
+    "opponent_retreat": "{side}得分。对方后退，{side}保有进攻权。",
+    "opponent_late_lunge": "{side}得分。对方进攻过晚，失去优先权。",
+    "opponent_arm_reset": "{side}得分。对方手臂动作中断，失去优先权。",
+    "blade_favored": "{side}得分。剑身动作取得优先权。",
+    "blade_override": "{side}得分。剑身动作改变了优先权。",
+    "blade_unavailable_fallback": "{side}得分。剑身分析不可用，按优先权时间线判定。",
+    "arm_first": "{side}得分。双方同时进攻，{side}先伸臂。",
+    "lunge_first": "{side}得分。双方同时进攻，{side}先完成进攻动作。",
+    "attack_first": "{side}得分。双方同时进攻，{side}启动更早。",
+    "slow_start": "{side}得分。对方启动较慢。",
+    "faster_attack": "{side}得分。{side}进攻更快。",
+    "system_tiebreak_right": "右方得分。双方优先权事件同时结束，系统判右方。",
+    "analysis_reason_unknown": "{side}得分。系统根据视觉分析判定优先权。",
+}
+
+_NEUTRAL_REASON_ZH = {
+    "no_touch": "无有效触灯。",
+    "epee_double_touch": "重剑双灯，双方得分。",
+    "unclear_double_touch": "双方触灯，无法判定优先权。",
+    "analysis_unavailable": "双方触灯，视觉分析不可用，按双灯处理。",
+    "analysis_no_winner": "双方触灯，视觉分析未能给出有效胜方。",
+}
+
+
+def _build_reason_metadata(
+    *,
+    ctx: MatchContext,
+    winner: str,
+    decision_source: str,
+    analysis_result: Optional[Dict[str, Any]],
+    processing_error: Optional[str],
+) -> Dict[str, Any]:
+    visual_side = _winner_visual_side(winner, ctx.side_map)
+    reason_code = _reason_code_for_result(
+        decision_source=decision_source,
+        analysis_result=analysis_result,
+        winner_visual_side=visual_side,
+        processing_error=processing_error,
+    )
+    spoken_reason = _spoken_reason_zh(reason_code, visual_side)
+    audio_key = _reason_audio_key(reason_code, visual_side)
+
+    payload: Dict[str, Any] = {
+        "reason_code": reason_code,
+        "reason_audio_key": audio_key,
+    }
+    if spoken_reason:
+        payload["spoken_reason_zh"] = spoken_reason
+        payload["natural_language_reason"] = spoken_reason
+    return payload
+
+
+def _reason_code_for_result(
+    *,
+    decision_source: str,
+    analysis_result: Optional[Dict[str, Any]],
+    winner_visual_side: Optional[str],
+    processing_error: Optional[str],
+) -> str:
+    if decision_source == "final_lights_no_touch":
+        return "no_touch"
+    if decision_source == "final_lights_single_touch":
+        return "single_light"
+    if decision_source == "final_lights_double_touch_epee":
+        return "epee_double_touch"
+    if decision_source == "final_lights_double_touch":
+        if processing_error:
+            return "analysis_unavailable"
+        if analysis_result is not None:
+            return "analysis_no_winner"
+        return "unclear_double_touch"
+    if decision_source != "local_streaming_analyzer":
+        return "analysis_reason_unknown" if winner_visual_side else "analysis_unavailable"
+    return _reason_code_from_analysis(analysis_result, winner_visual_side)
+
+
+def _reason_code_from_analysis(
+    analysis_result: Optional[Dict[str, Any]],
+    winner_visual_side: Optional[str],
+) -> str:
+    if not isinstance(analysis_result, dict) or winner_visual_side not in {"left", "right"}:
+        return "analysis_no_winner"
+
+    raw_reason = str(analysis_result.get("reason") or "").lower()
+    if "blade contact analysis unavailable" in raw_reason:
+        return "blade_unavailable_fallback"
+    if "non-accident blade contact overrode" in raw_reason:
+        return "blade_override"
+    if "non-accident blade contact favored" in raw_reason:
+        return "blade_favored"
+
+    priority_events = analysis_result.get("priority_events")
+    latest_event = priority_events.get("latest") if isinstance(priority_events, dict) else None
+    if isinstance(latest_event, list):
+        return "system_tiebreak_right"
+    if isinstance(latest_event, dict):
+        event_side = str(latest_event.get("side") or "").lower()
+        event_type = str(latest_event.get("type") or "").lower()
+        if event_side and event_side != winner_visual_side:
+            if event_type == "pause":
+                return "opponent_pause"
+            if event_type == "retreat":
+                return "opponent_retreat"
+            if event_type == "harmful_lunge":
+                return "opponent_late_lunge"
+            if event_type == "harmful_arm_extension":
+                return "opponent_arm_reset"
+
+    if "near-hit arm extension" in raw_reason:
+        return "arm_first"
+    if "beneficial lunge" in raw_reason:
+        return "lunge_first"
+    if "weighted signal start is earlier" in raw_reason:
+        return "attack_first"
+    if "slow-start penalty" in raw_reason:
+        return "slow_start"
+    if "faster" in raw_reason:
+        return "faster_attack"
+    return "analysis_reason_unknown"
+
+
+def _winner_visual_side(winner: str, side_map: Dict[str, str]) -> Optional[str]:
+    normalized = str(winner or "").strip()
+    if normalized in {"A", "B"}:
+        visual_side = side_map.get(normalized)
+        if visual_side in {"left", "right"}:
+            return visual_side
+    lowered = normalized.lower()
+    if lowered in {"left", "right"}:
+        return lowered
+    return None
+
+
+def _spoken_reason_zh(reason_code: str, visual_side: Optional[str]) -> str:
+    if visual_side in {"left", "right"} and reason_code in _SIDE_REASON_ZH:
+        return _SIDE_REASON_ZH[reason_code].format(side=_SIDE_ZH[visual_side])
+    return _NEUTRAL_REASON_ZH.get(reason_code, "")
+
+
+def _reason_audio_key(reason_code: str, visual_side: Optional[str]) -> str:
+    if visual_side in {"left", "right"} and reason_code in _SIDE_REASON_ZH:
+        return f"reason_{reason_code}_{visual_side}"
+    return f"reason_{reason_code}"
 
 
 def _weapon_code(value: Any) -> Optional[int]:

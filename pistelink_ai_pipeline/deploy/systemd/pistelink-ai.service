@@ -1,11 +1,4 @@
-# PisteLink AI camera/judging service.
-#
-# Install on this Jetson after the PisteLink backend host setup has created:
-#   /run/pistelink
-#   /var/lib/pistelink
-#
-# If deploying under the partner's default appliance user, change User/Group to
-# nvidia:nvidia and adjust the /home/thomas/fencing paths to the deployed path.
+# PisteLink AI camera/judging service for the product install root.
 [Unit]
 Description=PisteLink AI camera and judging service
 After=network-online.target
@@ -13,16 +6,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=thomas
-Group=thomas
+User=pistelink-ai
+Group=pistelink
 SupplementaryGroups=video audio render dialout
-WorkingDirectory=/home/thomas/fencing/pistelink_ai_pipeline/jetson_orin_nano_bundle
+WorkingDirectory=/opt/pistelink/ai/service
 Environment=PISTELINK_AI_SOCKET=/run/pistelink/ai.sock
 Environment=PISTELINK_RUNTIME_DIR=/run/pistelink
-Environment=PISTELINK_AI_SOCKET_GROUP=thomas
+Environment=PISTELINK_AI_SOCKET_GROUP=pistelink
 Environment=PISTELINK_AI_SOCKET_MODE=0660
 Environment=PISTELINK_MATCH_ROOT=/var/lib/pistelink/matches
-Environment=PISTELINK_ANALYZER_ROOT=/home/thomas/fencing/pistelink_ai_pipeline/portable_fencing_pipeline_low_latency_streaming
+Environment=PISTELINK_ANALYZER_ROOT=/opt/pistelink/ai/analyzer
+Environment=PISTELINK_ANALYZER_MODEL_PATH=/opt/pistelink/ai/models/yolo26l-pose_fast_fp16_ultra.engine
+Environment=PISTELINK_BLADE_MODEL_PATH=/opt/pistelink/ai/models/blade_touch_referee_model.joblib
 Environment=PISTELINK_ANALYZER_FISHEYE_BACKEND=none
 Environment=PISTELINK_ANALYZER_STARTUP_TIMEOUT=120
 Environment=FENCING_CAMERA_WIDTH=1280
@@ -33,7 +28,16 @@ RuntimeDirectory=pistelink
 RuntimeDirectoryMode=0770
 RuntimeDirectoryPreserve=yes
 UMask=0007
-ExecStart=/home/thomas/fencing/pistelink_ai_pipeline/jetson_orin_nano_bundle/run_pistelink_ai_service.sh
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=false
+ReadWritePaths=/var/lib/pistelink /run/pistelink
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=false
+ExecStart=/opt/pistelink/ai/service/run_pistelink_ai_service.sh
 Restart=always
 RestartSec=2
 

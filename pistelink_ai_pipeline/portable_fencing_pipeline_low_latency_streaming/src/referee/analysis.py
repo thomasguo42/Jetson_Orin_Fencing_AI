@@ -171,7 +171,7 @@ def _iter_gstreamer_mjpeg_frames(
     finally:
         pipeline.set_state(Gst.State.NULL)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDy_RRq8hd8rTYILt_mYtMH8GtM41GFp6I")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = "models/gemini-2.5-flash-lite"
 
 REFERENCE_INIT_FOLDER = "20251106_210036_phrase74_20251121T062543Z"
@@ -2104,6 +2104,8 @@ def build_decision_summary(decision: Dict[str, Any], phrase: FencingPhrase):
 
 def generate_gemini_reason(decision: Dict[str, Any], phrase: FencingPhrase):
     """Use Gemini to craft a one-sentence fencing explanation."""
+    if not GEMINI_API_KEY:
+        return decision.get("reason", "")
     try:
         import google.generativeai as genai
         genai.configure(api_key=GEMINI_API_KEY)

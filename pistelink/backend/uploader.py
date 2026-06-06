@@ -19,15 +19,21 @@ UPLOAD_BLOCK_BYTES = 64 * 1024  # FR-5.4: stream in 64 KiB blocks
 def _connect_kwargs(section: dict) -> dict:
     """Build asyncssh.connect() kwargs from the [upload] config section.
 
-    Host-key checking is disabled (known_hosts=None): this is an appliance that
-    uploads to an operator-configured server, with no known_hosts database to
-    manage. Authentication uses an SSH private key when `private_key` is set
-    (public-key auth, the client's setup), otherwise falls back to password.
+    Uploads require a pinned known_hosts file. For non-standard SSH ports, the
+    file should use OpenSSH bracket syntax, for example:
+    [upload.example.com]:52182 ssh-ed25519 AAAA...
     """
+    known_hosts = str(section.get("known_hosts", "") or "").strip()
+    if not known_hosts:
+        raise ValueError("SFTP known_hosts is required when upload host is configured")
+    known_hosts_path = Path(known_hosts).expanduser()
+    if not known_hosts_path.is_file():
+        raise FileNotFoundError(f"SFTP known_hosts file not found: {known_hosts_path}")
+
     kwargs = dict(
         port=section.get("port", 22),
         username=section.get("username", ""),
-        known_hosts=None,
+        known_hosts=str(known_hosts_path),
         connect_timeout=section.get("timeout_s", 60),
     )
     private_key = section.get("private_key", "")
